@@ -37,6 +37,11 @@ depths_dirty = range(3040.0,3053.0; step=0.2) #length=14)
 depth = unique([depths_clean...,depths_dirty...])
 setup = "high"
 
+# Special depths
+depth = collect(3035:1.0:3053) #.+ 0.5
+setup = "special"
+
+
 b, b1, b2 = RunBasalMixingModel(;depth=depth,t1=3000.0,dt=0.1)
 
 # Plot the results
