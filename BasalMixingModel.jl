@@ -1,10 +1,49 @@
 using CairoMakie
+using DifferentialEquations
+using LinearAlgebra
+
+"""
+    cell_thickness(depth, depth_bedrock)
+
+Compute the thickness of each grid cell from cell-center depths.
+
+# Arguments
+- `depth::AbstractVector{<:Real}`: Cell-center depths (positive downward), possibly unevenly spaced.
+- `depth_bedrock::Real`: Hard lower boundary of the bottom cell.
+
+# Returns
+- `Vector{Float64}`: Thickness of each cell, same length as `depth`.
+"""
+function cell_thickness(depth::AbstractVector{Float64}, depth_bedrock::Float64)
+
+    # Midpoints between adjacent centers form the interior interfaces
+    interfaces = (depth[1:end-1] .+ depth[2:end]) ./ 2
+
+    # Top interface: mirror the first interior interface about the first cell center
+    top = depth[1] - (interfaces[1] - depth[1])
+
+    # Bottom interface is exactly depth_bedrock
+    all_interfaces = [top; interfaces; depth_bedrock]
+
+    return diff(all_interfaces)
+end
+
+function mixing_rate_basic(depth,depth_bedrock,depth_dirty_ice,m_clean,m_dirty)
+    n = length(depth)
+    m = fill(0.0,n)
+    j_dirty_clean = findfirst(depth .>= depth_dirty_ice)
+    m[j_dirty_clean] = m_clean
+    m[j_dirty_clean+1:end] .= m_dirty
+    m[end] = 0.0        # No mixing at the bottom of last layer
+    return m
+end
 
 mutable struct BasalMixingModel
     n::Int
     layer::Vector{Int}
     depth::Vector{Float64}
     thickness::Vector{Float64}
+    mixing_rate::Vector{Float64}
     age_k81::Vector{Float64}
     c_k81::Vector{Float64}
     c_ar40::Vector{Float64}
@@ -14,6 +53,12 @@ end
 
 function BasalMixingModel(;
     depth::Union{Vector{Float64},UnitRange{Int64}} = collect(3035.0:3053.0),
+    depth_bedrock = 3053.44,
+    depth_dirty_ice = 3040.00,
+    thickness = cell_thickness(depth,depth_bedrock),
+    f_mixing_rate = mixing_rate_basic,
+    m_clean = 0.03,
+    m_dirty = m_clean*6,
     age_k81 = zeros(length(depth)),
     c_k81 = ones(length(depth)),
     c_ar40 = ones(length(depth)),
@@ -22,14 +67,17 @@ function BasalMixingModel(;
 
     n = length(depth)
     layers = 1:n
-    thickness = fill(diff(depth)[1],n)  # Uniform layer thickness
-    thickness = [diff(depth)..., diff(depth)[end]]
-    
+
+    if f_mixing_rate == mixing_rate_basic
+        mixing_rate = mixing_rate_basic(depth,depth_bedrock,depth_dirty_ice,m_clean,m_dirty)
+    end
+
     return BasalMixingModel(
         n,
         collect(layers),
         collect(depth),
         collect(thickness),
+        collect(mixing_rate),
         age_k81,
         c_k81,
         c_ar40,
@@ -91,17 +139,37 @@ function decay_step(R::Float64, dt::Float64; t_half::Float64 = 229.0)
     return R * 2.0^(-dt / t_half)
 end
 
-function mixing_step(R0::Float64, R1::Float64, dz0::Float64, dz1::Float64, dt::Float64, mixing_rate::Float64)
-    dV = mixing_rate * dt
+decay_constant(t_half::Float64 = 229.0) = log(2) / t_half
 
-    @assert dV < dz0 "Mixing volume ($dV) exceeds cell 0 thickness ($dz0) — reduce dt or mixing_rate"
-    @assert dV < dz1 "Mixing volume ($dV) exceeds cell 1 thickness ($dz1) — reduce dt or mixing_rate"
+function decay_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, dt::Float64; λ::Float64 = decay_constant())
+    dRdt .= -λ .* R .* exp(-λ * dt)
+    return
+end
 
-    R0_new = (R0 * dz0 - dV * R0 + dV * R1) / dz0
-    R1_new = (R1 * dz1 - dV * R1 + dV * R0) / dz1
+function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{Float64}, δz::Vector{Float64})
+    # R: concentration at cell centers [non-dimensional], length N
+    # Φ: mixing rate at lower edge of each cell [m/kyr], length N
+    #    Φ[j] is at the boundary between cell j and cell j+1
+    #    Φ[1] = 0 encodes no-flux at the upper boundary
+    #    Φ[N] = 0 encodes no-flux at the lower boundary
+    # δz: cell thickness [m], length N
+    # Returns dR/dt [ [R] kyr⁻¹], length N
 
-    #@assert R0_new*dz0 + R1_new*dz1 == R0*dz0 + R1*dz1 "Concentration is not conserved!"
-    return R0_new, R1_new
+    N = length(dRdt)
+
+    @assert Φ[1] == 0.0 "No flux at upper boundary required: Φ[1] must be 0"
+    @assert Φ[N] == 0.0 "No flux at lower boundary required: Φ[N] must be 0"
+
+    # Initialize rate to zero
+    dRdt .= 0.0
+
+    # Update flux contributions to each cell
+    for j in 1:N-1
+        dRdt[j]   += Φ[j] * (R[j+1] - R[j]) / δz[j]
+        dRdt[j+1] -= Φ[j] * (R[j+1] - R[j]) / δz[j+1]
+    end
+
+    return
 end
 
 """
@@ -156,54 +224,63 @@ function calc_ar40_ref(thickness::Float64;
     return ar40_ref
 end
 
-function RunBasalMixingModel(;t0=0.0,t1=1000.0,dt=1.0,mixing_rate_clean=0.03,mixing_rate_bottom=0.03*6,t_old=250.0)
+function linterp(x, y, xi)
+    i = findlast(x .<= xi)
+    t = (xi - x[i]) / (x[i+1] - x[i])
+    return y[i] + t * (y[i+1] - y[i])
+end
 
-    b = BasalMixingModel()
+function RunBasalMixingModel(;t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
+
+    b = BasalMixingModel(depth=collect(3035.0:1.0:3053.0))
+    #b = BasalMixingModel(depth=collect(3035.0:0.1:3053.0))
 
     # Get times to model
     time = t0:dt:t1
 
     # Get times and depths of interest
     times = collect(500.0:100.0:3000.0)
-    depths = [3045.0, 3047.0, 3050.0]
+    depths = [3044.8, 3047.4, 3049.84]
 
     # Determine clean ice indices
     jj_clean = findall(b.depth .<= 3040)
-    
+
     # Define summary objects
     b1 = BasalMixingModelSummary1(times,b.depth)
     b2 = BasalMixingModelSummary2(depths,collect(time))
-
-    mixing_rate = fill(mixing_rate_bottom,b.n-1)
-    mixing_rate[jj_clean] .= mixing_rate_clean
 
     # Set initial values
     b.c_k81 .= 1.0
     #b.c_ar40 = 
 
+    c_k81_prev = fill(0.0,b.n)
+    c_k81_prev_1 = fill(0.0,b.n)
+
+    dRdt_mixing = fill(0.0,b.n)
+    dRdt_decay  = fill(0.0,b.n)
+
+    k81_decay_constant = decay_constant(229.0)
+
     # Loop over time and advance model
     for (k, t) in enumerate(time)
 
-        # Save previous clean ice concentration
-        c_k81_clean = b.c_k81[1]
+        # Save initial concentration
+        c_k81_prev  .= copy.(b.c_k81)
 
-        # Update concentration from aging
-        b.c_k81 .= decay_step.(b.c_k81,dt; t_half=229.0)
+        # Get decay tendency
+        decay_tendency!(dRdt_decay, b.c_k81, dt; λ = k81_decay_constant)
 
-        # Update concentration from mixing
-        for j in 1:b.n-1
-            tmp0, tmp1 = mixing_step(
-                b.c_k81[j], b.c_k81[j+1], 
-                b.thickness[j], b.thickness[j+1], dt, 
-                mixing_rate[j]
-            )
-            b.c_k81[j], b.c_k81[j+1] = tmp0, tmp1
-        end
+        # Get mixing tendency
+        mixing_tendency!(dRdt_mixing, b.c_k81, b.mixing_rate, b.thickness)
 
-        # Restore clean ice age beyond t_old time
+        # Avoid mixing and aging in clean ice beyond t_old time
         if t > t_old
-            b.c_k81[jj_clean] .= c_k81_clean
+            dRdt_decay[jj_clean]  .= 0.0
+            dRdt_mixing[jj_clean] .= 0.0
         end
+
+        # Update concentration
+        b.c_k81 .= b.c_k81 .+ dRdt_decay .* dt .+ dRdt_mixing .* dt
 
         # Get ages too
         b.age_k81 .= concentration_to_age.(b.c_k81,1.0)
@@ -223,9 +300,8 @@ function RunBasalMixingModel(;t0=0.0,t1=1000.0,dt=1.0,mixing_rate_clean=0.03,mix
         # For each depth d of interest, store the value of the variables
         # at the current time
         for (i, d) in enumerate(b2.depths)
-            j = findall( abs.(d .- b.depth) .< 0.4 )[1] # Index of current depth
-            b2.age_k81[i,k] = b.age_k81[j]
-            b2.c_k81[i,k] = b.c_k81[j]
+            b2.age_k81[i,k] = linterp(b.depth, b.age_k81, d)
+            b2.c_k81[i,k] = linterp(b.depth, b.c_k81, d)
         end
 
         
