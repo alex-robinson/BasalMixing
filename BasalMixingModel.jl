@@ -38,19 +38,80 @@ function cell_thickness(depth::AbstractVector{Float64}, depth_bedrock::Float64)
     return diff(all_interfaces)
 end
 
-function mixing_rate_basic(depth,depth_bedrock,depth_dirty_ice,m_clean,m_dirty)
+function mixing_rate_basic_0(depth,depth_lim,m_clean,m_dirty)
+    # Get mixing rate defined at lower boundary of each cell
     n = length(depth)
     m = fill(0.0,n)
-    j_dirty_clean = findfirst(depth .>= depth_dirty_ice)
-    m[j_dirty_clean] = m_clean
-    m[j_dirty_clean+1:end] .= m_dirty
+    j_dirty = findfirst(depth .> depth_lim)
+    m[j_dirty-1] = m_clean
+    m[j_dirty:end] .= m_dirty
     m[end] = 0.0        # No mixing at the bottom of last layer
+    return m
+end
+
+function mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
+    # Get mixing rate defined at lower boundary of each cell
+    n = length(depth)
+    m = fill(0.0,n)
+    j_dirty = findfirst(depth .> depth_lim)
+    m[j_dirty-1] = m_clean
+    m[j_dirty:end] .= m_dirty
+    m[end] = 0.0        # No mixing at the bottom of last layer
+
+    n = length(depth)
+    m = fill(0.0,n)
+
+    for j in 1:n-1
+        if depth[j] <= depth_lim && depth[j+1] > depth_lim
+            # Transition to dirty ice
+            m[j] = m_clean
+        elseif depth[j] < depth_lim
+            # Clean ice
+            m[j] = 0.0
+        else
+            # Fully dirty ice
+            m[j] = m_dirty
+        end
+    end
+
+    m[end] = 0.0        # No mixing at the bottom of last layer
+
+    return m
+end
+
+function mixing_rate_continuous(depth, depth_lim, m_clean, m_dirty, delta)
+    # Get mixing rate defined at lower boundary of each cell
+    
+    n = length(depth)
+    m = fill(0.0,n)
+
+    for j in 1:n-1
+
+        # Get depth of lower cell boundary
+        depth_now = 0.5*(depth[j] + depth[j+1])
+
+        if depth_now < depth_lim
+            # Clean ice
+            m[j] = 0.0
+        elseif depth_now < depth_lim + delta
+            # Transition to dirty ice
+            w = (depth_now - depth_lim)/delta
+            m[j] = m_clean*(1-w) + m_dirty*w
+        else
+            # Fully dirty ice
+            m[j] = m_dirty
+        end
+
+    end
+
+    m[end] = 0.0        # No mixing at the bottom of last layer
+
     return m
 end
 
 mutable struct BasalMixingModel
     n::Int
-    depth_dirty_ice::Float64
+    depth_lim::Float64
     depth_bedrock::Float64
     layer::Vector{Int}
     depth::Vector{Float64}
@@ -65,7 +126,7 @@ end
 
 function BasalMixingModel(;
     depth::Union{Vector{Float64},UnitRange{Int64}} = collect(3035.0:3053.0),
-    depth_dirty_ice = 3040.00,
+    depth_lim = 3040.00,
     depth_bedrock = 3053.44,
     thickness = cell_thickness(depth,depth_bedrock),
     f_mixing_rate = mixing_rate_basic,
@@ -80,13 +141,25 @@ function BasalMixingModel(;
     n = length(depth)
     layers = 1:n
 
-    if f_mixing_rate == mixing_rate_basic
-        mixing_rate = mixing_rate_basic(depth,depth_bedrock,depth_dirty_ice,m_clean,m_dirty)
+    if f_mixing_rate == mixing_rate_basic_0
+        println("-- mixing_rate_basic_0")
+        mixing_rate = mixing_rate_basic_0(depth,depth_lim,m_clean,m_dirty)
+    elseif f_mixing_rate == mixing_rate_basic
+        println("-- mixing_rate_basic")
+        mixing_rate = mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
+    elseif f_mixing_rate == mixing_rate_continuous
+        println("-- mixing_rate_continuous")
+        mixing_rate = mixing_rate_continuous(depth, depth_lim, m_clean, m_dirty, 2.0)
+    elseif type(f_mixing_rate) == Vector{Float64}
+        println("-- imposed mixing_rate values")
+        mixing_rate = f_mixing_rate
+    else
+
     end
 
     return BasalMixingModel(
         n,
-        depth_dirty_ice,
+        depth_lim,
         depth_bedrock,
         collect(layers),
         collect(depth),
@@ -141,6 +214,29 @@ function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64})
     )
 end
 
+# Default depths
+function generate_depths(setup="default";depth=nothing)
+    if setup == "default"
+        depth = 3035:1.0:3053
+    elseif setup == "high"
+        depth = 3035:0.1:3053
+    elseif setup == "highdirty"
+        depths_clean = collect(3035:3040)
+        depths_dirty = range(3040.0,3053.0; step=0.2) #length=14)
+        depth = unique([depths_clean...,depths_dirty...])
+    else
+        depth = depth
+    end
+
+    return depth, setup
+end
+
+# High resolution depths
+
+# Variable resolution depths
+
+
+
 function concentration(R0::Float64, t::Float64; t_half::Float64 = 229.0)
     return R0 * 2.0^(-t / t_half)
 end
@@ -164,23 +260,20 @@ function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{
     # R: concentration at cell centers [non-dimensional], length N
     # Φ: mixing rate at lower edge of each cell [m/kyr], length N
     #    Φ[j] is at the boundary between cell j and cell j+1
-    #    Φ[1] = 0 encodes no-flux at the upper boundary
-    #    Φ[N] = 0 encodes no-flux at the lower boundary
     # δz: cell thickness [m], length N
     # Returns dR/dt [ [R] kyr⁻¹], length N
 
     N = length(dRdt)
-
-    @assert Φ[1] == 0.0 "No flux at upper boundary required: Φ[1] must be 0"
-    @assert Φ[N] == 0.0 "No flux at lower boundary required: Φ[N] must be 0"
-
+    
     # Initialize rate to zero
     dRdt .= 0.0
 
     # Update flux contributions to each cell
     for j in 1:N-1
-        dRdt[j]   += Φ[j] * (R[j+1] - R[j]) / δz[j]
-        dRdt[j+1] -= Φ[j] * (R[j+1] - R[j]) / δz[j+1]
+        #Φlower = 0.5 * (Φ[j] + Φ[j+1])  # Mixing rate at lower boundary
+        Φlower = Φ[j]                   # Mixing rate at lower boundary
+        dRdt[j]   += Φlower * (R[j+1] - R[j]) / δz[j]
+        dRdt[j+1] -= Φlower * (R[j+1] - R[j]) / δz[j+1]
     end
 
     return
@@ -244,9 +337,9 @@ function linterp(x, y, xi)
     return y[i] + t * (y[i+1] - y[i])
 end
 
-function RunBasalMixingModel(;depth = 3035:1.0:3053, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
+function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=mixing_rate_basic, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
 
-    b = BasalMixingModel(depth=collect(depth))
+    b = BasalMixingModel(depth=collect(depth),f_mixing_rate=f_mixing_rate)
 
     #b = BasalMixingModel(depth=collect(3035.0:1.0:3053.0))
     #b = BasalMixingModel(depth=collect(3035.0:0.1:3053.0))
@@ -356,7 +449,7 @@ function plot_BasalMixingModelRun(b,b1,b2;k81=nothing,ar40=nothing)
     d = collect(-3052:2:-3036)
     ax0.yticks = (d,string.(abs.(d)))
 
-    add_clean_dirty_boundary!(ax0, 0.28, -b.depth_dirty_ice)
+    add_clean_dirty_boundary!(ax0, 0.28, -b.depth_lim)
     hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
     
     lines!(ax0,b.mixing_rate,-b.depth;color=:black,linewidth=2)
@@ -367,7 +460,7 @@ function plot_BasalMixingModelRun(b,b1,b2;k81=nothing,ar40=nothing)
     ax1.yticks = (d,string.(abs.(d)))
     ax1.xticks = [200,400,600,800]
 
-    add_clean_dirty_boundary!(ax1, 0.28, -b.depth_dirty_ice,with_label=false)
+    add_clean_dirty_boundary!(ax1, 0.28, -b.depth_lim,with_label=false)
     hlines!(ax1,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
     
     # Plot time slices from model
