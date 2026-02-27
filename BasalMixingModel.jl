@@ -65,50 +65,6 @@ function cell_thickness(depth::AbstractVector{Float64}, depth_bedrock::Float64)
     return diff(all_interfaces)
 end
 
-function mixing_rate_discrete_0(depth,depth_lim,m_clean,m_dirty)
-    # Get mixing rate defined at lower boundary of each cell
-    n = length(depth)
-    m = fill(0.0,n)
-    j_dirty = findfirst(depth .> depth_lim)
-    m[j_dirty-1] = m_clean
-    m[j_dirty:end] .= m_dirty
-    m[end] = 0.0        # No mixing at the bottom of last layer
-    return m
-end
-
-function mixing_rate_discrete_1(depth,depth_lim,m_clean,m_dirty,dz_ref)
-    # Get mixing rate defined at lower boundary of each cell
-    
-    println("-- mixing_rate_discrete_1: $depth_lim, $m_clean, $m_dirty")
-
-    n = length(depth)
-    m = fill(0.0,n)
-    j_dirty = findfirst(depth .> depth_lim)
-    m[j_dirty-1] = m_clean
-    m[j_dirty:end] .= m_dirty
-    m[end] = 0.0        # No mixing at the bottom of last layer
-
-    n = length(depth)
-    m = fill(0.0,n)
-
-    for j in 1:n-1
-        if depth[j] <= depth_lim && depth[j+1] > depth_lim
-            # Transition to dirty ice
-            m[j] = m_clean * dz_ref / (depth[j+1]-depth[j])
-        elseif depth[j] < depth_lim
-            # Clean ice
-            m[j] = 0.0
-        else
-            # Fully dirty ice
-            m[j] = m_dirty
-        end
-    end
-
-    m[end] = 0.0        # No mixing at the bottom of last layer
-
-    return m
-end
-
 function mixing_rate_discrete(depth, depth_lim, m_clean, m_dirty, delta)
     println("-- mixing_rate_discrete: $depth_lim, $m_clean, $m_dirty, $delta")
 
@@ -136,6 +92,29 @@ end
 
 function make_mixing_rate_discrete(depth_lim, m_clean, m_dirty, delta)
     return depth -> mixing_rate_discrete(
+        depth,
+        depth_lim,
+        m_clean,
+        m_dirty,
+        delta
+    )
+end
+
+function mixing_rate_smooth(depth, depth_lim, m_clean, m_dirty, delta; sharpness=50.0)
+    n = length(depth)
+    m = fill(0.0, n)
+    for j in 1:n-1
+        d = 0.5 * (depth[j] + depth[j+1])
+        w1 = 0.5 * (1 + tanh(sharpness * (d - depth_lim) / delta))         # 0→1 at depth_lim
+        w2 = 0.5 * (1 + tanh(sharpness * (d - depth_lim - delta) / delta)) # 0→1 at depth_lim+delta
+        m[j] = m_dirty * w1 * w2 + m_clean * w1 * (1 - w2)
+    end
+    m[end] = 0.0
+    return m
+end
+
+function make_mixing_rate_smooth(depth_lim, m_clean, m_dirty, delta)
+    return depth -> mixing_rate_smooth(
         depth,
         depth_lim,
         m_clean,
@@ -335,25 +314,24 @@ function decay_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, dt::Float64;
     return
 end
 
-function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{Float64}, δz::Vector{Float64})
-    # R: concentration at cell centers [non-dimensional], length N
+function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{Float64}, Δz::Vector{Float64}; Lref::Float64=1.0)
+    # R: concentration at cell centers [R], length N
     # Φ: mixing rate at lower edge of each cell [m/kyr], length N
-    #    Φ[j] is at the boundary between cell j and cell j+1
-    # δz: cell thickness [m], length N
+    #    - Φ[j] is at the boundary between cell j and cell j+1
+    # Lref: length scale of diffusivity [m]
+    # Δz: cell thickness [m], length N
     # Returns dR/dt [ [R] kyr⁻¹], length N
 
     N = length(dRdt)
     
-    # Initialize rate to zero
-    dRdt .= 0.0
-
     # Update flux contributions to each cell
+    dRdt .= 0.0
     for j in 1:N-1
-        Φlower = Φ[j]                   # Mixing rate at lower boundary
-        dz_interface = 0.5 * (δz[j] + δz[j+1])  # Center-to-center distance
-        flux = Φlower * (R[j+1] - R[j]) / dz_interface
-        dRdt[j]   += flux / δz[j]
-        dRdt[j+1] -= flux / δz[j+1]
+        D = Φ[j] * Lref                             # Diffusivity: mixing rate at lower boundary [m/kyr] * length scale [m] == [m^2/kyr]
+        Δz_interface = 0.5 * (Δz[j] + Δz[j+1])      # Center-to-center distance [m]
+        flux = D * (R[j+1] - R[j]) / Δz_interface   # [R/kyr]
+        dRdt[j]   += flux / Δz[j]       # [R/kyr]
+        dRdt[j+1] -= flux / Δz[j+1]     # [R/kyr]
     end
 
     return
@@ -421,9 +399,6 @@ function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0
 
     b = BasalMixingModel(depth=collect(depth),f_mixing_rate=f_mixing_rate)
 
-    #b = BasalMixingModel(depth=collect(3035.0:1.0:3053.0))
-    #b = BasalMixingModel(depth=collect(3035.0:0.1:3053.0))
-
     # Get times to model
     time = t0:dt:t1
 
@@ -439,7 +414,7 @@ function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0
     b2 = BasalMixingModelSummary2(depths,collect(time))
 
     # Set initial values
-    b.c_k81 .= 1.0
+    b.c_k81 .= 1.0  # [c/m]
     #b.c_ar40 = 
 
     dRdt_mixing = fill(0.0,b.n)
@@ -455,11 +430,11 @@ function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0
 
         # Get mixing tendency
         mixing_tendency!(dRdt_mixing, b.c_k81, b.mixing_rate, b.thickness)
+        dRdt_mixing[jj_clean] .= 0.0
 
         # Avoid mixing and aging in clean ice beyond t_old time
         if t > t_old
             dRdt_decay[jj_clean]  .= 0.0
-            dRdt_mixing[jj_clean] .= 0.0
         end
 
         # Update concentration
@@ -487,7 +462,6 @@ function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0
             b2.c_k81[i,k] = linterp(b.depth, b.c_k81, d)
         end
 
-        
     end
 
     return b, b1, b2
@@ -529,7 +503,7 @@ function plot_BasalMixingModelRun(b,b1,b2;k81=nothing,ar40=nothing)
     d = collect(-3052:2:-3036)
     ax0.yticks = (d,string.(abs.(d)))
     ax0.xticks = [0.0,0.1,0.2]
-    
+
     add_clean_dirty_boundary!(ax0, 0.98, -b.depth_lim)
     hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
     
