@@ -35,7 +35,7 @@ begin
     #f_mixing_rate = make_mixing_rate_continuous(3040.0, m_clean, m_dirty, depth_scale)
     #f_mixing_rate = make_mixing_rate_exponential(3040.0, m_clean, m_dirty, depth_scale)
 
-    b, b1, b2 = RunBasalMixingModel(;depth=depth,f_mixing_rate=f_mixing_rate,t1=3000.0,dt=0.05)
+    b, b1, b2 = RunBasalMixingModel(;depth=depth,f_mixing_rate=f_mixing_rate,t1=3000.0,dt=0.1)
 
     # Plot the results
     fig = plot_BasalMixingModelRun(b,b1,b2;k81=k81_data) #,ar40=ar40_data)
