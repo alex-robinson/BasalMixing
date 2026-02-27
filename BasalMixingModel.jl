@@ -12,6 +12,33 @@ function mysave(fout,fig;px_per_unit=2)
     return fout
 end
 
+# Default depths
+function generate_depths(setup="default";depth=nothing,step=0.2)
+    if setup == "default"
+        depth = 3035:1.0:3053
+    elseif setup == "high"
+        depth = 3035:0.1:3053
+    elseif setup == "highdirty"
+        depths_clean = collect(3035:3040)
+        depths_dirty = range(3039.0,3053.0; step=step) #length=14)
+        depth = unique(sort([depths_clean...,depths_dirty...]))
+        dx = string(step)
+        setup = setup*"-dx$dx"
+    elseif setup == "highzoom"
+        depths_clean = collect(3035.0:3053.0)
+        depths_dirty = range(3040.0,3045.0; step=step) #length=14)
+        depth = unique(sort([depths_clean...,depths_dirty...]))
+        dx = string(step)
+        setup = setup*"-dx$dx"
+    else
+        @assert !isnothing(depth)
+        depth = depth
+        setup = setup
+    end
+
+    return depth, setup
+end
+
 """
     cell_thickness(depth, depth_bedrock)
 
@@ -38,7 +65,7 @@ function cell_thickness(depth::AbstractVector{Float64}, depth_bedrock::Float64)
     return diff(all_interfaces)
 end
 
-function mixing_rate_basic_0(depth,depth_lim,m_clean,m_dirty)
+function mixing_rate_discrete_0(depth,depth_lim,m_clean,m_dirty)
     # Get mixing rate defined at lower boundary of each cell
     n = length(depth)
     m = fill(0.0,n)
@@ -49,8 +76,11 @@ function mixing_rate_basic_0(depth,depth_lim,m_clean,m_dirty)
     return m
 end
 
-function mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
+function mixing_rate_discrete_1(depth,depth_lim,m_clean,m_dirty,dz_ref)
     # Get mixing rate defined at lower boundary of each cell
+    
+    println("-- mixing_rate_discrete_1: $depth_lim, $m_clean, $m_dirty")
+
     n = length(depth)
     m = fill(0.0,n)
     j_dirty = findfirst(depth .> depth_lim)
@@ -64,7 +94,7 @@ function mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
     for j in 1:n-1
         if depth[j] <= depth_lim && depth[j+1] > depth_lim
             # Transition to dirty ice
-            m[j] = m_clean
+            m[j] = m_clean * dz_ref / (depth[j+1]-depth[j])
         elseif depth[j] < depth_lim
             # Clean ice
             m[j] = 0.0
@@ -79,9 +109,46 @@ function mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
     return m
 end
 
+function mixing_rate_discrete(depth, depth_lim, m_clean, m_dirty, delta)
+    println("-- mixing_rate_discrete: $depth_lim, $m_clean, $m_dirty, $delta")
+
+    n = length(depth)
+    m = fill(0.0, n)
+
+    for j in 1:n-1
+        depth_interface = 0.5 * (depth[j] + depth[j+1])
+        if depth_interface < depth_lim
+            # Above transition zone: no mixing
+            m[j] = 0.0
+        elseif depth_interface < depth_lim + delta
+            # Transition zone: clean ice mixing rate
+            m[j] = m_clean
+        else
+            # Fully dirty ice
+            m[j] = m_dirty
+        end
+    end
+
+    m[end] = 0.0  # No mixing at the bottom of last layer
+
+    return m
+end
+
+function make_mixing_rate_discrete(depth_lim, m_clean, m_dirty, delta)
+    return depth -> mixing_rate_discrete(
+        depth,
+        depth_lim,
+        m_clean,
+        m_dirty,
+        delta
+    )
+end
+
 function mixing_rate_continuous(depth, depth_lim, m_clean, m_dirty, delta)
     # Get mixing rate defined at lower boundary of each cell
     
+    println("-- mixing_rate_continuous: $depth_lim, $m_clean, $m_dirty, $delta")
+
     n = length(depth)
     m = fill(0.0,n)
 
@@ -109,6 +176,51 @@ function mixing_rate_continuous(depth, depth_lim, m_clean, m_dirty, delta)
     return m
 end
 
+function make_mixing_rate_continuous(depth_lim, m_clean, m_dirty, delta)
+    return depth -> mixing_rate_continuous(
+        depth,
+        depth_lim,
+        m_clean,
+        m_dirty,
+        delta
+    )
+end
+
+function mixing_rate_exponential(depth, depth_lim, m_clean, m_dirty, lambda)
+
+    println("-- mixing_rate_exponential: $depth_lim, $m_clean, $m_dirty, $lambda")
+
+    n = length(depth)
+    m = fill(0.0,n)
+
+    for j in 1:n-1
+
+        depth_now = 0.5*(depth[j] + depth[j+1])
+
+        if depth_now < depth_lim
+            m[j] = 0.0
+        else
+            w = 1 - exp(-(depth_now - depth_lim)/lambda)
+            m[j] = m_clean*(1-w) + m_dirty*w
+        end
+
+    end
+
+    m[end] = 0.0
+
+    return m
+end
+
+function make_mixing_rate_exponential(depth_lim, m_clean, m_dirty, lambda)
+    return depth -> mixing_rate_exponential(
+        depth,
+        depth_lim,
+        m_clean,
+        m_dirty,
+        lambda
+    )
+end
+
 mutable struct BasalMixingModel
     n::Int
     depth_lim::Float64
@@ -129,7 +241,7 @@ function BasalMixingModel(;
     depth_lim = 3040.00,
     depth_bedrock = 3053.44,
     thickness = cell_thickness(depth,depth_bedrock),
-    f_mixing_rate = mixing_rate_basic,
+    f_mixing_rate = nothing,
     m_clean = 0.03,
     m_dirty = m_clean*6,
     age_k81 = zeros(length(depth)),
@@ -141,20 +253,10 @@ function BasalMixingModel(;
     n = length(depth)
     layers = 1:n
 
-    if f_mixing_rate == mixing_rate_basic_0
-        println("-- mixing_rate_basic_0")
-        mixing_rate = mixing_rate_basic_0(depth,depth_lim,m_clean,m_dirty)
-    elseif f_mixing_rate == mixing_rate_basic
-        println("-- mixing_rate_basic")
-        mixing_rate = mixing_rate_basic(depth,depth_lim,m_clean,m_dirty)
-    elseif f_mixing_rate == mixing_rate_continuous
-        println("-- mixing_rate_continuous")
-        mixing_rate = mixing_rate_continuous(depth, depth_lim, m_clean, m_dirty, 2.0)
-    elseif type(f_mixing_rate) == Vector{Float64}
-        println("-- imposed mixing_rate values")
-        mixing_rate = f_mixing_rate
+    if isnothing(f_mixing_rate)
+        f_mixing_rate = mixing_rate_discrete(depth,depth_lim,0.03,0.03*6,1.0)
     else
-
+        mixing_rate = f_mixing_rate(depth)
     end
 
     return BasalMixingModel(
@@ -214,29 +316,6 @@ function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64})
     )
 end
 
-# Default depths
-function generate_depths(setup="default";depth=nothing)
-    if setup == "default"
-        depth = 3035:1.0:3053
-    elseif setup == "high"
-        depth = 3035:0.1:3053
-    elseif setup == "highdirty"
-        depths_clean = collect(3035:3040)
-        depths_dirty = range(3040.0,3053.0; step=0.2) #length=14)
-        depth = unique([depths_clean...,depths_dirty...])
-    else
-        depth = depth
-    end
-
-    return depth, setup
-end
-
-# High resolution depths
-
-# Variable resolution depths
-
-
-
 function concentration(R0::Float64, t::Float64; t_half::Float64 = 229.0)
     return R0 * 2.0^(-t / t_half)
 end
@@ -270,10 +349,11 @@ function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{
 
     # Update flux contributions to each cell
     for j in 1:N-1
-        #Φlower = 0.5 * (Φ[j] + Φ[j+1])  # Mixing rate at lower boundary
         Φlower = Φ[j]                   # Mixing rate at lower boundary
-        dRdt[j]   += Φlower * (R[j+1] - R[j]) / δz[j]
-        dRdt[j+1] -= Φlower * (R[j+1] - R[j]) / δz[j+1]
+        dz_interface = 0.5 * (δz[j] + δz[j+1])  # Center-to-center distance
+        flux = Φlower * (R[j+1] - R[j]) / dz_interface
+        dRdt[j]   += flux / δz[j]
+        dRdt[j+1] -= flux / δz[j+1]
     end
 
     return
@@ -337,7 +417,7 @@ function linterp(x, y, xi)
     return y[i] + t * (y[i+1] - y[i])
 end
 
-function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=mixing_rate_basic, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
+function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
 
     b = BasalMixingModel(depth=collect(depth),f_mixing_rate=f_mixing_rate)
 
@@ -444,15 +524,17 @@ function plot_BasalMixingModelRun(b,b1,b2;k81=nothing,ar40=nothing)
     end
 
     ## PANEL 0: mixing rate versus depth
-    ax0 = Axis(fig[1,1], limits=((-0.10,0.30),(-3053,-3035)), xlabel="Mixing rate (m/yr)", ylabel="Depth (m)", ygridvisible = false )
+    ax0 = Axis(fig[1,1], limits=((-0.05,0.25),(-3053,-3035)), xlabel="Mixing rate (m/yr)", ylabel="Depth (m)", ygridvisible = false )
     colsize!(fig.layout, 1, Auto(0.6))
     d = collect(-3052:2:-3036)
     ax0.yticks = (d,string.(abs.(d)))
-
-    add_clean_dirty_boundary!(ax0, 0.28, -b.depth_lim)
+    ax0.xticks = [0.0,0.1,0.2]
+    
+    add_clean_dirty_boundary!(ax0, 0.98, -b.depth_lim)
     hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
     
-    lines!(ax0,b.mixing_rate,-b.depth;color=:black,linewidth=2)
+    jj = findall(b.depth .>= b.depth_lim)
+    scatter!(ax0,b.mixing_rate[jj],-b.depth[jj];color=:black,markersize=5)
 
     ## PANEL 1: Depth versus closed-system age
     ax1 = Axis(fig[1,end+1], limits=((200,800),(-3053,-3035)), xlabel="⁸¹K closed system age (kyr)", ylabel="Depth (m)", ygridvisible = false )

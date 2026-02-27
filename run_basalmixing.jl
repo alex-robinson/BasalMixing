@@ -21,16 +21,25 @@ k81_data[!,:depth] = 0.5 .* (k81_data[!,"depth_top"] .+ k81_data[!,"depth_bottom
 # Include code for basal mixing model
 include("BasalMixingModel.jl")
 
-depth, setup = generate_depths("default")
-#depth, setup = generate_depths("high")
-#depth, setup = generate_depths("highdirty")
+begin
+    #depth, setup = generate_depths("default")
+    #depth, setup = generate_depths("high")
+    depth, setup = generate_depths("highdirty";step=0.25)
 
-#f_mixing_rate = mixing_rate_basic
-f_mixing_rate = mixing_rate_continuous
-b, b1, b2 = RunBasalMixingModel(;depth=depth,f_mixing_rate=f_mixing_rate,t1=3000.0,dt=0.1)
+    m_clean = 0.03
+    m_dirty = m_clean*6
+    depth_scale = 1.0
 
-# Plot the results
+    f_mixing_rate = make_mixing_rate_discrete(3040.0, m_clean, m_dirty, depth_scale)
+    #f_mixing_rate = make_mixing_rate_continuous(3040.0, m_clean, m_dirty, depth_scale)
+    #f_mixing_rate = make_mixing_rate_exponential(3040.0, m_clean, m_dirty, depth_scale)
 
-fig = plot_BasalMixingModelRun(b,b1,b2;k81=k81_data) #,ar40=ar40_data)
+    b, b1, b2 = RunBasalMixingModel(;depth=depth,f_mixing_rate=f_mixing_rate,t1=3000.0,dt=0.1)
+
+    # Plot the results
+    fig = plot_BasalMixingModelRun(b,b1,b2;k81=k81_data) #,ar40=ar40_data)
+end
+
+
 
 mysave(plt_prefix()*"mixingmodel_$setup.png",fig)
