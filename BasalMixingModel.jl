@@ -233,7 +233,7 @@ function BasalMixingModel(;
     layers = 1:n
 
     if isnothing(f_mixing_rate)
-        f_mixing_rate = mixing_rate_discrete(depth,depth_lim,0.03,0.03*6,1.0)
+        mixing_rate = fill(0.0,n)
     else
         mixing_rate = f_mixing_rate(depth)
     end
@@ -395,9 +395,16 @@ function linterp(x, y, xi)
     return y[i] + t * (y[i+1] - y[i])
 end
 
-function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
+function RunBasalMixingModel(p ;depth = 3035:1.0:3053, t0=0.0,t1=1000.0,dt=1.0,t_old=250.0)
 
-    b = BasalMixingModel(depth=collect(depth),f_mixing_rate=f_mixing_rate)
+    # Extract model parameters
+    (L_ref, depth_scale, m_clean, m_dirty) = p
+
+    # Initialize mixing model
+    b = BasalMixingModel(depth=collect(depth))
+
+    # Define mixing rate
+    b.mixing_rate = mixing_rate_smooth(collect(depth), b.depth_lim, m_clean, m_dirty, depth_scale)
 
     # Get times to model
     time = t0:dt:t1
@@ -429,7 +436,7 @@ function RunBasalMixingModel(;depth = 3035:1.0:3053, f_mixing_rate=nothing, t0=0
         decay_tendency!(dRdt_decay, b.c_k81, dt; λ = k81_decay_constant)
 
         # Get mixing tendency
-        mixing_tendency!(dRdt_mixing, b.c_k81, b.mixing_rate, b.thickness)
+        mixing_tendency!(dRdt_mixing, b.c_k81, b.mixing_rate, b.thickness; Lref=L_ref)
         dRdt_mixing[jj_clean] .= 0.0
 
         # Avoid mixing and aging in clean ice beyond t_old time
@@ -558,4 +565,17 @@ function plot_BasalMixingModelRun(b,b1,b2;k81=nothing,ar40=nothing)
     hspan!(ax2, k81.age .- k81.age_lo, k81.age .+ k81.age_hi; color=col_k81_transparent)
 
     return fig
+end
+
+function load_basalmixing_data()
+
+    # Get data to compare with
+    ar40_data = CSV.read("data/Bender2010_ar40_data.txt",DataFrame;delim="|",ignorerepeated=true)
+    rename!(ar40_data, strip.(names(ar40_data)))
+
+    k81_data = CSV.read("data/k81_data.txt",DataFrame;delim=" ",ignorerepeated=true)
+    rename!(k81_data, strip.(names(k81_data)))
+    k81_data[!,:depth] = 0.5 .* (k81_data[!,"depth_top"] .+ k81_data[!,"depth_bottom"])
+
+    return Dict(:k81=>k81_data, :ar40=>ar40_data)
 end
