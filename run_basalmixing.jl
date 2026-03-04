@@ -22,7 +22,7 @@ begin
 
     p = (
         L_ref = 1.0,
-        depth_scale = 1.0,
+        delta = 1.0,
         m_clean = 0.03,
         m_dirty = 0.18
     )
@@ -34,6 +34,7 @@ begin
 
     # Plot the results
     fig = plot_BasalMixingModelRun(b,b1,b2;k81=k81) #,ar40=ar40_data)
+
 end
 
 mysave(plt_prefix()*"mixingmodel_$setup.png",fig)

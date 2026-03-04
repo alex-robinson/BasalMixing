@@ -179,41 +179,6 @@ function make_mixing_rate_continuous(depth_lim, m_clean, m_dirty, delta)
     )
 end
 
-function mixing_rate_exponential(depth, depth_lim, m_clean, m_dirty, lambda)
-
-    println("-- mixing_rate_exponential: $depth_lim, $m_clean, $m_dirty, $lambda")
-
-    n = length(depth)
-    m = fill(0.0,n)
-
-    for j in 1:n-1
-
-        depth_now = 0.5*(depth[j] + depth[j+1])
-
-        if depth_now < depth_lim
-            m[j] = 0.0
-        else
-            w = 1 - exp(-(depth_now - depth_lim)/lambda)
-            m[j] = m_clean*(1-w) + m_dirty*w
-        end
-
-    end
-
-    m[end] = 0.0
-
-    return m
-end
-
-function make_mixing_rate_exponential(depth_lim, m_clean, m_dirty, lambda)
-    return depth -> mixing_rate_exponential(
-        depth,
-        depth_lim,
-        m_clean,
-        m_dirty,
-        lambda
-    )
-end
-
 mutable struct BasalMixingModel
     n::Int
     depth_lim::Float64
@@ -252,6 +217,10 @@ function BasalMixingModel(;
         mixing_rate = f_mixing_rate(depth)
     end
 
+    # Define summary objects
+    b1 = sampling ? nothing : BasalMixingModelSummary1(times, b.depth) # Only need BasalMixingModelSummary1 when not sampling
+    b2 = BasalMixingModelSummary2(depths,collect(time))
+    
     return BasalMixingModel(
         n,
         depth_lim,
@@ -409,16 +378,18 @@ function linterp(x, y, xi)
     return y[i] + t * (y[i+1] - y[i])
 end
 
-function RunBasalMixingModel(p ;depth = 3035:1.0:3053, t0=0.0,t1=3000.0,dt=1.0,t_old=250.0, sampling=false)
+function RunBasalMixingModel(p ; b = nothing, depth = 3035:1.0:3053, t0=0.0,t1=3000.0,dt=1.0,t_old=250.0, sampling=false)
 
     # Extract model parameters
-    (L_ref, depth_scale, m_clean, m_dirty) = p
+    (L_ref, delta, m_clean, m_dirty) = p
 
     # Initialize mixing model
-    b = BasalMixingModel(depth=collect(depth))
+    if isnothing(b)
+        b = BasalMixingModel(depth=collect(depth))
+    end
 
-    # Define mixing rate
-    b.mixing_rate = mixing_rate_smooth(collect(depth), b.depth_lim, m_clean, m_dirty, depth_scale)
+    # Define the mixing rate vector
+    b.mixing_rate = mixing_rate_smooth(collect(depth), b.depth_lim, m_clean, m_dirty, delta)
 
     # Get times to model
     time = t0:dt:t1
@@ -507,12 +478,12 @@ function RunBasalMixingModel(p ;depth = 3035:1.0:3053, t0=0.0,t1=3000.0,dt=1.0,t
     return b, b1, b2, true              # true = integration succeeded
 end
 
-function RunBasalMixingModel(p, dat; depth = 3035:1.0:3053, t0=0.0,t1=3000.0,dt=1.0,t_old=250.0, sampling=false)
+function RunBasalMixingModel(p, dat; b = nothing, depth = 3035:1.0:3053, t0=0.0,t1=3000.0,dt=1.0,t_old=250.0, sampling=false)
     
     # Extract dataframes for comparison
     (k81, ar40) = dat
 
-    b, b1, b2, success = RunBasalMixingModel(p ;depth=depth,t0=t0,t1=t1,dt=dt,t_old=t_old, sampling=sampling)
+    b, b1, b2, success = RunBasalMixingModel(p ;b=b,depth=depth,t0=t0,t1=t1,dt=dt,t_old=t_old, sampling=sampling)
 
     if success
         n = length(b2.time)
