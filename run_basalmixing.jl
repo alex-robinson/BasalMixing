@@ -21,7 +21,6 @@ begin
     depth, setup = generate_depths("highdirty";step=0.25)
 
     p = (
-        L_ref = 1.0,
         delta = 1.0,
         m_clean = 0.03,
         m_dirty = 0.18,

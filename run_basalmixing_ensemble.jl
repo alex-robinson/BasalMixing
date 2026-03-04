@@ -26,80 +26,75 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
     lines!(ax, x, pdf.(prior, x); color=color, kwargs...)
 end
 
-# priors = (
-#     L_ref       = Uniform(0.1, 1.5),    # 1 m
-#     delta       = Uniform(0.1, 2.0),    # 1 m
-#     m_clean     = truncated(Normal(0.03, 0.02), lower=0.0), # 0.03 m/kyr
-#     m_dirty     = truncated(Normal(0.18, 0.10), lower=0.0), # 0.18 m/kyr  
-#     σ           = Exponential(30.0),    # 30 kyr
-# )
 priors = (
-    L_ref       = Uniform(0.1, 1.5),    # 1 m
     delta       = Uniform(0.1, 2.0),    # 1 m
-    m_clean     = Uniform(0.0, 0.1),    # 0.03 m/kyr
-    m_dirty     = Uniform(0.0,0.5),     # 0.18 m/kyr  
-    σ           = Exponential(30.0),    # 30 kyr
+    m_clean     = truncated(Normal(0.03, 0.02), lower=0.0), # 0.03 m/kyr
+    m_dirty     = truncated(Normal(0.18, 0.10), lower=0.0), # 0.18 m/kyr  
+    #σ           = Exponential(30.0),    # 30 kyr
+    t_old = 250.0,
+    σ = 30.0
 )
+# priors = (
+#     delta       = Uniform(0.1, 2.0),    # 1 m
+#     m_clean     = Uniform(0.0, 0.1),    # 0.03 m/kyr
+#     m_dirty     = Uniform(0.0,0.5),     # 0.18 m/kyr  
+#     #t_old       = Uniform(150.0,350.0), # 250 kyr
+#     #σ           = Exponential(30.0),    # 30 kyr
+#     t_old = 250.0,
+#     σ = 30.0
+# )
 
-@model function basal_mixing(age_obs, depth, dt, priors)
-    L_ref       ~ priors.L_ref      
-    #L_ref       = 1.0
-    delta ~ priors.delta     
-    #delta = 1.0
-    m_clean     ~ priors.m_clean
-    m_dirty     ~ priors.m_dirty 
-    σ ~ priors.σ
-    #σ = 30.0
-    
+@model function basal_mixing(age_obs, b, dat, dt, priors)
+
+    ## Set priors ##
+
+    delta ~ priors.delta
+    m_clean ~ priors.m_clean
+    m_dirty ~ priors.m_dirty
+    t_old = priors.t_old
+    σ     = priors.σ
+
+    ## Extract obs ##
+    (k81, ar40) = dat
+    #age_obs = k81.age # Must be passed in separately as a vector to be sampled
+
     # Run the model
-    p = (L_ref=L_ref, delta=delta, m_clean=m_clean, m_dirty=m_dirty)
-    _, _, b2, success = RunBasalMixingModel(p; depth=depth, dt=dt, sampling=true)
+    p = (delta=delta, m_clean=m_clean, m_dirty=m_dirty, t_old=t_old)
+    success = RunBasalMixingModel!(p, b, dat; dt=dt, sampling=true)
     
     if !success
         # Try one more time with a smaller timestep
-        _, _, b2, success = RunBasalMixingModel(p; depth=depth, dt=dt*0.5, sampling=true)
+        success = RunBasalMixingModel!(p, b, dat; dt=dt*0.5, sampling=true)
     end
 
-    # Extract the best-fit age profile at the optimal time
-
-    n_obs = length(age_obs)
-
     if success
-        # Interpolate each depth's age time series at t_best
-        #age_pred = [linterp(b2.time, b2.age_k81[i, :], t_best) for i in 1:n_obs]
-
-        # Compute SSR at every time step across all observations
-        n_times = length(b2.time)
-        ssr = [sum((age_obs[i] - b2.age_k81[i, t])^2 for i in 1:n_obs) for t in 1:n_times]
-
-        # Find the time index that minimises SSR
-        t_best_idx = argmin(ssr)
-        time_pred  = b2.time[t_best_idx]
-        age_pred   = b2.age_k81[:, t_best_idx]
+        # Extract the best-fit ages at the optimal time
+        time_pred = b.b2.time[b.b2.kmin]
+        age_pred  = b.b2.age_k81[:,b.b2.kmin]
     else
-        # Assign a very high age so that Likelihood is low
+        # Assign a very high age so that Likelihood is very low
         time_pred = 0.0
-        age_pred  = fill(1e8, n_obs)
+        age_pred  = fill(1e8, length(age_obs))
     end
 
     # Likelihood: observed k81 ages ~ Normal(predicted, σ)
     age_obs ~ MvNormal(age_pred, σ * I)
 
-    return (time_pred = time_pred, age_pred = age_pred)  # return whatever you want
+    return (time_pred = time_pred, age_pred = age_pred)
 end
 
 ## SCRIPT ##
 
 # Load datasets for comparison
 (k81, ar40) = load_basalmixing_data()
-age_k81 = k81[!,"age"]
 
 depth, setup = generate_depths("highdirty";step=0.25)
+b = BasalMixingModel(depth=depth)
 
-model = basal_mixing(age_k81, depth, 0.2, priors)
+model = basal_mixing(k81.age, b, (k81, ar40), 0.2, priors)
 
 # Start with MH to verify it works, then switch to SMC for better exploration
-chain = sample(model, MH(), MCMCThreads(), 5_000, 4)  # 4 chains in parallel
+chain = sample(model, MH(), MCMCThreads(), 1000, 4)  # 4 chains in parallel
 
 # Or SMC (no chain length needed — uses particle count)
 #chain = @timed sample(model, SMC(1000), 1000)
@@ -108,8 +103,8 @@ chain = sample(model, MH(), MCMCThreads(), 5_000, 4)  # 4 chains in parallel
 
 begin
     df = DataFrame(chain)
-    params = [:L_ref, :delta, :m_clean, :m_dirty, :t_best]
-    labels = ["L_ref", "delta", "m_clean", "m_dirty", "t_best"]
+    params = [:delta, :m_clean, :m_dirty, :t_old]
+    labels = ["delta", "m_clean", "m_dirty", "t_old"]
     best_idx = argmax(df.logjoint)
 
     describe(chain)
@@ -118,11 +113,10 @@ end
 
 begin
     p = (
-        L_ref       = df.L_ref[best_idx],
-        depth_scale = df.delta[best_idx],
-        m_clean     = df.m_clean[best_idx],
-        m_dirty     = df.m_dirty[best_idx],
-        t_old       = 250.0,
+        delta   = df.delta[best_idx],
+        m_clean = df.m_clean[best_idx],
+        m_dirty = df.m_dirty[best_idx],
+        t_old   = 250.0,
     )
 
     b = BasalMixingModel(depth=depth)

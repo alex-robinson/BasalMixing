@@ -89,7 +89,7 @@ function BasalMixingModelSummary1(times::Vector{Float64},depth::Vector{Float64})
     )
 end
 
-struct BasalMixingModelSummary2
+mutable struct BasalMixingModelSummary2
     depths::Vector{Float64}     # depths of interest
     time::Vector{Float64}       # time axis
     time_set::Set{Float64}      # time axis set
@@ -98,6 +98,7 @@ struct BasalMixingModelSummary2
     c_ar40::Array{Float64}      # [nd,nt]
     sse_k81::Vector{Float64}    # [nt]
     interp_idx::Vector{Int}     # [nd]
+    kmin::Int                   # Index of minimum error
 end
 
 function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64},depth::Vector{Float64})
@@ -113,7 +114,7 @@ function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64},
     interp_idx = [findlast(depth .<= d) for d in depths]
 
     return BasalMixingModelSummary2(
-        depths, time, Set(time), age_k81, c_k81, c_ar40, sse_k81, interp_idx
+        depths, time, Set(time), age_k81, c_k81, c_ar40, sse_k81, interp_idx, 1
     )
 end
 
@@ -220,7 +221,8 @@ end
 function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     # Extract model parameters
-    (L_ref, delta, m_clean, m_dirty, t_old) = p
+    (delta, m_clean, m_dirty, t_old) = p
+    L_ref = 1.0     # [m] Use L_ref=1.0, since this just scales m_clean, can tune m_clean directly
 
     # Extract data for comparison
     (k81, ar40) = dat
@@ -241,6 +243,7 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     b.rmse_k81 = 1e8     # Initialize to a high value in case time loop exits prematurely
     b.time_k81 = 0.0 
+    b.b2.kmin = 1
 
     k81_decay_constant = decay_constant(229.0)
 
@@ -317,13 +320,13 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     end
 
     # Calculate metrics
-    kmin = argmin(b.b2.sse_k81)
+    b.b2.kmin = kmin = argmin(b.b2.sse_k81)
     b.rmse_k81 = sqrt(b.b2.sse_k81[kmin]/n_obs_k81)
     b.time_k81 = b.b2.time[kmin]
-
+    
     if !sampling
-        time, rmse = b.time_k81, b.rmse_k81
-        println("k81 (time, rmse): $time, $rmse")
+        rmse, time, ages = b.rmse_k81, b.time_k81, round.(b.b2.age_k81[:,b.b2.kmin])
+        println("k81 (time, rmse, ages): $rmse, $time, $ages")
     end
 
     return true                 # true = integration succeeded
