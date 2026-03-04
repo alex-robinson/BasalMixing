@@ -29,31 +29,20 @@ end
 priors = (
     delta       = Uniform(0.1, 2.0),    # 1 m
     m_clean     = truncated(Normal(0.03, 0.02), lower=0.0), # 0.03 m/kyr
-    m_dirty     = truncated(Normal(0.18, 0.10), lower=0.0), # 0.18 m/kyr
-    t_old       = Uniform(150.0,350.0), # 250 kyr
+    f_dirty     = Uniform(4.0, 8.0),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
+    t_old       = Normal(250.0,100.0),  # 250 kyr
     #σ           = Exponential(30.0),    # 30 kyr
     #t_old = 250.0,
-    σ = 30.0
+    σ = 30.0,
+    time_pred   = Uniform(0.0,3000.0),  # Anything is possible
 )
-# priors = (
-#     delta       = Uniform(0.1, 2.0),    # 1 m
-#     m_clean     = Uniform(0.0, 0.1),    # 0.03 m/kyr
-#     m_dirty     = Uniform(0.0,0.5),     # 0.18 m/kyr  
-#     #t_old       = Uniform(150.0,350.0), # 250 kyr
-#     #σ           = Exponential(30.0),    # 30 kyr
-#     t_old = 250.0,
-#     σ = 30.0
-# )
 
 @model function basal_mixing(age_obs, b, dat, dt, priors)
 
     ## Set priors ##
-
-    ## Set priors ##
-
     delta   = priors.delta   isa Distribution ? delta   ~ priors.delta   : priors.delta
     m_clean = priors.m_clean isa Distribution ? m_clean ~ priors.m_clean : priors.m_clean
-    m_dirty = priors.m_dirty isa Distribution ? m_dirty ~ priors.m_dirty : priors.m_dirty
+    f_dirty = priors.f_dirty isa Distribution ? f_dirty ~ priors.f_dirty : priors.f_dirty
     t_old   = priors.t_old   isa Distribution ? t_old   ~ priors.t_old   : priors.t_old
     σ       = priors.σ       isa Distribution ? σ       ~ priors.σ       : priors.σ
 
@@ -62,7 +51,7 @@ priors = (
     #age_obs = k81.age # Must be passed in separately as a vector to be sampled
 
     # Run the model
-    p = (delta=delta, m_clean=m_clean, m_dirty=m_dirty, t_old=t_old)
+    p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old)
     success = RunBasalMixingModel!(p, b, dat; dt=dt, sampling=true)
     
     if !success
@@ -72,18 +61,18 @@ priors = (
 
     if success
         # Extract the best-fit ages at the optimal time
-        time_pred = b.b2.time[b.b2.kmin]
-        age_pred  = b.b2.age_k81[:,b.b2.kmin]
+        time_pred := b.b2.time[b.b2.kmin]
+        age_pred  := b.b2.age_k81[:,b.b2.kmin]
     else
         # Assign a very high age so that Likelihood is very low
-        time_pred = 0.0
-        age_pred  = fill(1e8, length(age_obs))
+        time_pred := 0.0
+        age_pred  := fill(1e8, length(age_obs))
     end
 
     # Likelihood: observed k81 ages ~ Normal(predicted, σ)
     age_obs ~ MvNormal(age_pred, σ * I)
 
-    return (time_pred = time_pred, age_pred = age_pred)
+    return
 end
 
 ## SCRIPT ##
@@ -96,18 +85,15 @@ b = BasalMixingModel(depth=depth)
 
 model = basal_mixing(k81.age, b, (k81, ar40), 0.2, priors)
 
-# Start with MH to verify it works, then switch to SMC for better exploration
+# Sample using Metropolis Hastings (MH)
 chain = sample(model, MH(), MCMCThreads(), 10_000, 4)  # 4 chains in parallel
-
-# Or SMC (no chain length needed — uses particle count)
-#chain = @timed sample(model, SMC(1000), 1000)
 
 ## Analysis
 
 begin
     df = DataFrame(chain)
-    params = [:delta, :m_clean, :m_dirty, :t_old]
-    labels = ["delta", "m_clean", "m_dirty", "t_old"]
+    params = [:delta, :m_clean, :f_dirty, :t_old, :time_pred]
+    labels = ["delta", "m_clean", "f_dirty", "t_old", "time_pred"]
     best_idx = argmax(df.logjoint)
 
     describe(chain)
@@ -118,8 +104,8 @@ begin
     p = (
         delta   = df.delta[best_idx],
         m_clean = df.m_clean[best_idx],
-        m_dirty = df.m_dirty[best_idx],
-        t_old   = 250.0,
+        f_dirty = df.f_dirty[best_idx],
+        t_old   = df.t_old[best_idx],
     )
 
     b = BasalMixingModel(depth=depth)

@@ -23,7 +23,7 @@ begin
     p = (
         delta = 1.0,
         m_clean = 0.03,
-        m_dirty = 0.18,
+        f_dirty = 6.0,
         t_old = 250.0,
     )
 

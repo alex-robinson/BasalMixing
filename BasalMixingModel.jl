@@ -148,9 +148,6 @@ function BasalMixingModel(;
     depth_lim = 3040.00,
     depth_bedrock = 3053.44,
     thickness = cell_thickness(depth,depth_bedrock),
-    f_mixing_rate = nothing,
-    m_clean = 0.03,
-    m_dirty = m_clean*6,
     age_k81 = zeros(length(depth)),
     c_k81 = ones(length(depth)),
     c_ar40 = ones(length(depth)),
@@ -163,11 +160,7 @@ function BasalMixingModel(;
     # Determine clean ice indices
     jj_clean = findall(depth .<= depth_lim)
 
-    if isnothing(f_mixing_rate)
-        mixing_rate = fill(0.0,n)
-    else
-        mixing_rate = f_mixing_rate(depth)
-    end
+    mixing_rate = fill(0.0,n)
 
     dRdt_mixing = zeros(length(depth))
     dRdt_decay  = zeros(length(depth))
@@ -214,22 +207,28 @@ function ResetBasalMixingModel!(b)
     b.b2.c_k81 .= 0.0
     b.b2.c_ar40 .= 0.0
     b.b2.sse_k81 .= 0.0
+    b.b2.kmin = 1
 
+    b.rmse_k81 = 1e8
+    b.time_k81 = 0.0 
+    
     return
 end
 
 function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     # Extract model parameters
-    (delta, m_clean, m_dirty, t_old) = p
+    (delta, m_clean, f_dirty, t_old) = p
     L_ref = 1.0     # [m] Use L_ref=1.0, since this just scales m_clean, can tune m_clean directly
+
+    k81_decay_constant = decay_constant(229.0)
 
     # Extract data for comparison
     (k81, ar40) = dat
     n_obs_k81 = length(k81.age)
     
     # Set the mixing rate
-    mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_dirty, delta)
+    mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
 
     # Get times to model
     time = t0:dt:t1
@@ -241,14 +240,8 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     b.c_k81 .= 1.0  # [c/m]
     #b.c_ar40 = 
 
-    b.rmse_k81 = 1e8     # Initialize to a high value in case time loop exits prematurely
-    b.time_k81 = 0.0 
-    b.b2.kmin = 1
-
-    k81_decay_constant = decay_constant(229.0)
-
+    # Loop over time and advance model
     try
-        # Loop over time and advance model
         for (k, t) in enumerate(time)
 
             # Get decay tendency
