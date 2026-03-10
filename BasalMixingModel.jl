@@ -22,6 +22,16 @@ function load_basalmixing_data()
     rename!(k81, strip.(names(k81)))
     k81[!,:depth] = 0.5 .* (k81[!,"depth_top"] .+ k81[!,"depth_bottom"])
 
+    # Get errors too
+    n_obs_k81 = length(k81.age)
+    k81_sigma = (sum(k81.age_hi) + sum(k81.age_lo)) / (2*n_obs_k81)
+    n_obs_dar40 = length(ar40.var"δ40/38atm")
+    dar40_sigma = sum(ar40.var"δ40/38atm_err") / n_obs_dar40
+
+    # Single values, but store in DataFrames
+    k81[!,:age_sigma] = fill(k81_sigma,n_obs_k81)
+    ar40[!,:dar40_sigma] = fill(dar40_sigma,n_obs_dar40)
+
     #return Dict(:k81=>k81, :ar40=>ar40)
     return (k81, ar40)
 end
@@ -97,12 +107,11 @@ mutable struct BasalMixingModelSummary2
     time_set::Set{Float64}      # time axis set
     age_k81::Array{Float64}     # [nd,nt]
     c_k81::Array{Float64}       # [nd,nt]
-    c_ar40::Array{Float64}      # [nd,nt]
-    dar40::Array{Float64}       # [nd,nt]
-    sse_k81::Vector{Float64}    # [nt]
-    sse_dar40::Vector{Float64}  # [nt]
+    rmse_k81::Vector{Float64}   # [nt]
     interp_idx::Vector{Int}     # [nd]
     kmin::Int                   # Index of minimum error
+    rmse_min_k81::Float64
+    time_min_k81::Float64
 end
 
 function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64},depth::Vector{Float64})
@@ -111,16 +120,47 @@ function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64},
     
     age_k81 = fill(0.0, nd, nt)
     c_k81 = fill(0.0, nd, nt)
-    c_ar40 = fill(0.0, nd, nt)
-    dar40 = fill(0.0, nd, nt)
-    sse_k81 = fill(0.0,nt)
-    sse_dar40 = fill(0.0,nt)
+    rmse_k81 = fill(0.0,nt)
 
     # Get depth interpolation indices to able to fill b2 with the right depth values
     interp_idx = [findlast(depth .<= d) for d in depths]
 
     return BasalMixingModelSummary2(
-        depths, time, Set(time), age_k81, c_k81, c_ar40, dar40, sse_k81, sse_dar40, interp_idx, 1
+        depths, time, Set(time), age_k81, c_k81, rmse_k81, interp_idx, 1, 1e8, 0.0
+    )
+end
+
+mutable struct BasalMixingModelSummary3
+    depths::Vector{Float64}     # depths of interest
+    time::Vector{Float64}       # time axis
+    time_set::Set{Float64}      # time axis set
+    c_ar40::Array{Float64}      # [nd,nt]
+    dar40::Array{Float64}       # [nd,nt]
+    rmse_dar40::Vector{Float64} # [nt]
+    interp_idx::Vector{Int}     # [nd]
+    kmin::Int                   # Index of minimum error
+    rmse_min_dar40::Float64
+    time_min_dar40::Float64
+end
+
+function BasalMixingModelSummary3(depths::Vector{Float64},time::Vector{Float64},depth::Vector{Float64})
+
+    # Limit depths to those available
+    idx = findall(depths .>= minimum(depth) .&& depths .<= maximum(depth))
+    depths = depths[idx]
+
+    nd = length(depths)
+    nt = length(time)
+    
+    c_ar40 = fill(0.0, nd, nt)
+    dar40 = fill(0.0, nd, nt)
+    rmse_dar40 = fill(0.0,nt)
+
+    # Get depth interpolation indices to able to fill b2 with the right depth values
+    interp_idx = [findlast(depth .<= d) for d in depths]
+
+    return BasalMixingModelSummary3(
+        depths, time, Set(time), c_ar40, dar40, rmse_dar40, interp_idx, 1, 1e8, 0.0
     )
 end
 
@@ -145,10 +185,11 @@ mutable struct BasalMixingModel
 
     b1::BasalMixingModelSummary1
     b2::BasalMixingModelSummary2
+    b3::BasalMixingModelSummary3
 
-    rmse_k81::Float64
-    time_k81::Float64
-    rmse_dar40::Float64
+    kmin::Int
+    rmse_min::Float64
+    time_min::Float64
 end
 
 function BasalMixingModel(;
@@ -176,7 +217,12 @@ function BasalMixingModel(;
 
     # Define summary objects
     b1 = BasalMixingModelSummary1(collect(500.0:100.0:3000.0), depth)
-    b2 = BasalMixingModelSummary2([3044.8, 3047.4, 3049.84],collect(0.0:1.0:3000.0), depth)
+
+    k81_depths = [3044.8, 3047.4, 3049.84]
+    b2 = BasalMixingModelSummary2(k81_depths,collect(0.0:1.0:3000.0), depth)
+
+    ar40_depths = [131.5, 3000.0, 3004.02, 3008.0, 3016.0, 3020.0, 3028.0, 3036.5, 3038.0, 3042.4, 3044.6, 3045.29, 3047.0, 3048.8, 3049.2, 3051.04, 3052.39]
+    b3 = BasalMixingModelSummary3(ar40_depths,collect(0.0:1.0:3000.0), depth)
 
     return BasalMixingModel(
         n,
@@ -196,9 +242,10 @@ function BasalMixingModel(;
         dRdt_decay,
         b1,
         b2,
+        b3,
+        1,
         1e8,
-        0.0,
-        1e8
+        0.0
     )
 end
 
@@ -217,15 +264,21 @@ function ResetBasalMixingModel!(b)
 
     b.b2.age_k81 .= 0.0
     b.b2.c_k81 .= 0.0
-    b.b2.c_ar40 .= 0.0
-    b.b2.dar40 .= 0.0
-    b.b2.sse_k81 .= 0.0
-    b.b2.sse_dar40 .= 0.0
+    b.b2.rmse_k81 .= 0.0
     b.b2.kmin = 1
+    b.b2.rmse_min_k81 = 1e8
+    b.b2.time_min_k81 = 0.0
 
-    b.rmse_k81 = 1e8
-    b.time_k81 = 0.0 
-    b.rmse_dar40 = 1e8
+    b.b3.c_ar40 .= 0.0
+    b.b3.dar40 .= 0.0
+    b.b3.rmse_dar40 .= 0.0
+    b.b3.kmin = 1
+    b.b3.rmse_min_dar40 = 1e8
+    b.b3.time_min_dar40 = 0.0
+    
+    b.kmin = 1
+    b.rmse_min = 1e8
+    b.time_min = 0.0
 
     return
 end
@@ -240,8 +293,15 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     # Extract data for comparison
     (k81, ar40) = dat
-    n_obs_k81 = length(k81.age)
-    n_obs_ar40 = length(ar40.var"δ40/38atm")
+    k81_sigma = k81.age_sigma[1]
+    k81_var   = k81_sigma^2
+    dar40_sigma = ar40.dar40_sigma[1]
+    dar40_var   = dar40_sigma^2
+
+    #n_obs_k81 = length(k81.age)
+    #n_obs_dar40 = length(ar40.var"δ40/38atm")
+    n_obs_k81 = length(b.b2.depths)
+    n_obs_dar40 = length(b.b3.depths)
 
     # Set the mixing rate
     mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
@@ -316,8 +376,8 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                 end
             end
 
-            # For each depth d of interest, store the value of the variables
-            # at the current time
+            # K81 ##
+            # For each depth d of interest, store the value of the variables at the current time
             if t in b.b2.time_set
 
                 #k1 = findfirst(==(t), b.b2.time)
@@ -328,23 +388,15 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                     d_frac = (d - b.depth[j]) / (b.depth[j+1] - b.depth[j])
                     b.b2.age_k81[i,k1] = b.age_k81[j] + d_frac * (b.age_k81[j+1] - b.age_k81[j])
                     b.b2.c_k81[i,k1]   = b.c_k81[j]   + d_frac * (b.c_k81[j+1]   - b.c_k81[j])
-                    b.b2.c_ar40[i,k1]  = b.c_ar40[j]  + d_frac * (b.c_ar40[j+1]  - b.c_ar40[j])
-                    b.b2.dar40[i,k1]   = b.dar40[j]   + d_frac * (b.dar40[j+1]   - b.dar40[j])
                 end
                 
                 # Get sum of squared errors over all observations for current time
                 sse = 0.0
                 for i in 1:n_obs_k81
-                    sse += (b.b2.age_k81[i,k1] - k81.age[i])^2
+                    iobs = argmin(abs.(b.b2.depths[i] .- k81.depth))
+                    sse += (b.b2.age_k81[i,k1] - k81.age[iobs])^2 / k81_var
                 end
-                b.b2.sse_k81[k1] = sse
-                
-                # index i doesn't have the right length!
-                # sse = 0.0
-                # for i in 1:n_obs_ar40
-                #     sse += (b.b2.dar40[i,k1] - ar40.var"δ40/38atm"[i])^2
-                # end
-                # b.b2.sse_dar40[k1] = sse
+                b.b2.rmse_k81[k1] = sqrt(sse/n_obs_k81)
                 
                 # Stop time loop early if sampling and relevant ages are too high already
                 if sampling && minimum(@view b.b2.age_k81[:,k1]) >= 1000
@@ -352,6 +404,29 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                 end
             end
 
+            # Ar40 ##
+            # For each depth d of interest, store the value of the variables at the current time
+            if t in b.b3.time_set
+
+                #k1 = findfirst(==(t), b.b3.time)
+                k1 = round(Int, (t - t0) / 1.0) + 1     # b.b3.time has dt=1.0
+
+                for (i, d) in enumerate(b.b3.depths)
+                    j = b.b3.interp_idx[i]
+                    d_frac = (d - b.depth[j]) / (b.depth[j+1] - b.depth[j])
+                    b.b3.c_ar40[i,k1]  = b.c_ar40[j]  + d_frac * (b.c_ar40[j+1]  - b.c_ar40[j])
+                    b.b3.dar40[i,k1]   = b.dar40[j]   + d_frac * (b.dar40[j+1]   - b.dar40[j])
+                end
+                
+                # Get sum of squared errors over all observations for current time
+                sse = 0.0
+                for i in 1:n_obs_dar40
+                    iobs = argmin(abs.(b.b3.depths[i] .- ar40.depth))
+                    sse += (b.b3.dar40[i,k1] - ar40.var"δ40/38atm"[iobs])^2 / dar40_var
+                end
+                b.b3.rmse_dar40[k1] = sqrt(sse/n_obs_dar40)
+                
+            end
         end
     
     catch e
@@ -359,15 +434,22 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
         return false            # false = integration failed
     end
 
-    # Calculate metrics
-    b.b2.kmin = kmin = argmin(b.b2.sse_k81)
-    b.rmse_k81 = sqrt(b.b2.sse_k81[kmin]/n_obs_k81)
-    b.time_k81 = b.b2.time[kmin]
-    b.rmse_dar40 = sqrt(b.b2.sse_dar40[kmin]/n_obs_ar40)
-    
+    # Calculate summary metrics
+    b.b2.kmin = kmin = argmin(b.b2.rmse_k81)
+    b.b2.rmse_min_k81 = b.b2.rmse_k81[kmin]
+    b.b2.time_min_k81 = b.b2.time[kmin]
+
+    b.b3.kmin = kmin = argmin(b.b3.rmse_dar40)
+    b.b3.rmse_min_dar40 = b.b3.rmse_dar40[kmin]
+    b.b3.time_min_dar40 = b.b3.time[kmin]
+
+    b.kmin = kmin = argmin(b.b2.rmse_k81 .+ b.b3.rmse_dar40)
+    b.rmse_min = b.b2.rmse_k81[kmin] + b.b3.rmse_dar40[kmin]
+    b.time_min = b.b3.time[kmin]
+
     if !sampling
-        rmse1, time, rmse2, ages = b.rmse_k81, b.time_k81, b.rmse_dar40, round.(b.b2.age_k81[:,b.b2.kmin])
-        println("k81 (rmse, time, ages): $rmse1, $time, $rmse2, $ages")
+        rmse_min, rmses, time_min, ages = b.rmse_min, [b.b2.rmse_min_k81, b.b3.rmse_min_dar40], b.time_min, round.(b.b2.age_k81[:,b.b2.kmin])
+        println("k81&dAr40 (rmse_min, rmses, time_min, ages): $rmse_min, $rmses, $time_min, $ages")
     end
 
     return true                 # true = integration succeeded
