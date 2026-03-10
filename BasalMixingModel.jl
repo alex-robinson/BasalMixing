@@ -12,21 +12,31 @@ function mysave(fout,fig;px_per_unit=2)
     return fout
 end
 
-function load_basalmixing_data()
+function load_basalmixing_data(;depth=[0.0,5000.0])
 
     # Get data to compare with
     ar40 = CSV.read("data/Bender2010_ar40_data.txt",DataFrame;delim="|",ignorerepeated=true)
     rename!(ar40, strip.(names(ar40)))
-
+    ar40[!,:dar40] = ar40.var"δ40/38atm"
+    ar40[!,:dar40_err] = ar40.var"δ40/38atm_err"
+    
+    # Limit to depth range of interest
+    idx = findall(ar40.depth .>= minimum(depth) .&& ar40.depth .<= maximum(depth))
+    ar40 = ar40[idx,:]
+    
     k81 = CSV.read("data/k81_data.txt",DataFrame;delim=" ",ignorerepeated=true)
     rename!(k81, strip.(names(k81)))
     k81[!,:depth] = 0.5 .* (k81[!,"depth_top"] .+ k81[!,"depth_bottom"])
 
+    # Limit to depth range of interest
+    idx = findall(k81.depth .>= minimum(depth) .&& k81.depth .<= maximum(depth))
+    k81 = k81[idx,:]
+
     # Get errors too
     n_obs_k81 = length(k81.age)
     k81_sigma = (sum(k81.age_hi) + sum(k81.age_lo)) / (2*n_obs_k81)
-    n_obs_dar40 = length(ar40.var"δ40/38atm")
-    dar40_sigma = sum(ar40.var"δ40/38atm_err") / n_obs_dar40
+    n_obs_dar40 = length(ar40.dar40)
+    dar40_sigma = sum(ar40.dar40_err) / n_obs_dar40
 
     # Single values, but store in DataFrames
     k81[!,:age_sigma] = fill(k81_sigma,n_obs_k81)
@@ -144,11 +154,6 @@ mutable struct BasalMixingModelSummary3
 end
 
 function BasalMixingModelSummary3(depths::Vector{Float64},time::Vector{Float64},depth::Vector{Float64})
-
-    # Limit depths to those available
-    idx = findall(depths .>= minimum(depth) .&& depths .<= maximum(depth))
-    depths = depths[idx]
-
     nd = length(depths)
     nt = length(time)
     
@@ -221,7 +226,7 @@ function BasalMixingModel(;
     k81_depths = [3044.8, 3047.4, 3049.84]
     b2 = BasalMixingModelSummary2(k81_depths,collect(0.0:1.0:3000.0), depth)
 
-    ar40_depths = [131.5, 3000.0, 3004.02, 3008.0, 3016.0, 3020.0, 3028.0, 3036.5, 3038.0, 3042.4, 3044.6, 3045.29, 3047.0, 3048.8, 3049.2, 3051.04, 3052.39]
+    ar40_depths = [3036.5, 3038.0, 3042.4, 3044.6, 3045.29, 3047.0, 3048.8, 3049.2, 3051.04, 3052.39]
     b3 = BasalMixingModelSummary3(ar40_depths,collect(0.0:1.0:3000.0), depth)
 
     return BasalMixingModel(
@@ -299,7 +304,7 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     dar40_var   = dar40_sigma^2
 
     #n_obs_k81 = length(k81.age)
-    #n_obs_dar40 = length(ar40.var"δ40/38atm")
+    #n_obs_dar40 = length(ar40.dar40)
     n_obs_k81 = length(b.b2.depths)
     n_obs_dar40 = length(b.b3.depths)
 
@@ -422,7 +427,7 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                 sse = 0.0
                 for i in 1:n_obs_dar40
                     iobs = argmin(abs.(b.b3.depths[i] .- ar40.depth))
-                    sse += (b.b3.dar40[i,k1] - ar40.var"δ40/38atm"[iobs])^2 / dar40_var
+                    sse += (b.b3.dar40[i,k1] - ar40.dar40[iobs])^2 / dar40_var
                 end
                 b.b3.rmse_dar40[k1] = sqrt(sse/n_obs_dar40)
                 
@@ -665,8 +670,8 @@ function plot_BasalMixingModelRun(b;k81=nothing,ar40=nothing)
         end
 
         # Plot data too
-        errorbars!(ax3, ar40[!,"δ40/38atm"],-ar40[!,"depth"], ar40[!,"δ40/38atm_err"], ar40[!,"δ40/38atm_err"], color=col_ar40, direction=:x, whiskerwidth=8)
-        scatter!(ax3, ar40[!,"δ40/38atm"],-ar40[!,"depth"], color=col_ar40, marker=:circle, markersize=12)
+        errorbars!(ax3, ar40[!,:dar40],-ar40[!,"depth"], ar40[!,:dar40_err], ar40[!,:dar40_err], color=col_ar40, direction=:x, whiskerwidth=8)
+        scatter!(ax3, ar40[!,:dar40],-ar40[!,"depth"], color=col_ar40, marker=:circle, markersize=12)
     end
 
     ## PANEL 2 or 3: Closed-system age versus time
