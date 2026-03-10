@@ -12,10 +12,10 @@ using DataFrames
 # Include code for basal mixing model
 include("BasalMixingModel.jl")
 
-# Load datasets for comparison
-(k81, ar40) = load_basalmixing_data()
-
 begin
+    # Load datasets for comparison
+    (k81, ar40) = load_basalmixing_data()
+
     #depth, setup = generate_depths("default")
     #depth, setup = generate_depths("high")
     depth, setup = generate_depths("highdirty";step=0.25)
@@ -25,6 +25,7 @@ begin
         m_clean = 0.03,
         f_dirty = 6.0,
         t_old = 250.0,
+        F_ar40 = 0.0075,
     )
 
     b = BasalMixingModel(depth=depth)
@@ -33,7 +34,7 @@ begin
     #@btime RunBasalMixingModel!(p, b, (k81, ar40); dt=0.1, sampling=true)
 
     # Plot the results
-    fig = plot_BasalMixingModelRun(b; k81=k81) #,ar40=ar40_data)
+    fig = plot_BasalMixingModelRun(b; k81=k81, ar40=ar40) #,ar40=ar40_data)
 
 end
 

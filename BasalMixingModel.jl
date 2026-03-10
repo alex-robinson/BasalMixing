@@ -74,6 +74,7 @@ struct BasalMixingModelSummary1
     age_k81::Array{Float64}     # [nt,nd]
     c_k81::Array{Float64}       # [nt,nd]
     c_ar40::Array{Float64}      # [nt,nd]
+    dar40::Array{Float64}       # [nt,nd]
 end
 
 function BasalMixingModelSummary1(times::Vector{Float64},depth::Vector{Float64})
@@ -83,9 +84,10 @@ function BasalMixingModelSummary1(times::Vector{Float64},depth::Vector{Float64})
     age_k81 = fill(0.0, nt, nd)
     c_k81 = fill(0.0, nt, nd)
     c_ar40 = fill(0.0, nt, nd)
+    dar40 = fill(0.0, nt, nd)
 
     return BasalMixingModelSummary1(
-        times, Set(times), depth, age_k81, c_k81, c_ar40
+        times, Set(times), depth, age_k81, c_k81, c_ar40, dar40
     )
 end
 
@@ -96,7 +98,9 @@ mutable struct BasalMixingModelSummary2
     age_k81::Array{Float64}     # [nd,nt]
     c_k81::Array{Float64}       # [nd,nt]
     c_ar40::Array{Float64}      # [nd,nt]
+    dar40::Array{Float64}       # [nd,nt]
     sse_k81::Vector{Float64}    # [nt]
+    sse_dar40::Vector{Float64}  # [nt]
     interp_idx::Vector{Int}     # [nd]
     kmin::Int                   # Index of minimum error
 end
@@ -108,13 +112,15 @@ function BasalMixingModelSummary2(depths::Vector{Float64},time::Vector{Float64},
     age_k81 = fill(0.0, nd, nt)
     c_k81 = fill(0.0, nd, nt)
     c_ar40 = fill(0.0, nd, nt)
+    dar40 = fill(0.0, nd, nt)
     sse_k81 = fill(0.0,nt)
+    sse_dar40 = fill(0.0,nt)
 
     # Get depth interpolation indices to able to fill b2 with the right depth values
     interp_idx = [findlast(depth .<= d) for d in depths]
 
     return BasalMixingModelSummary2(
-        depths, time, Set(time), age_k81, c_k81, c_ar40, sse_k81, interp_idx, 1
+        depths, time, Set(time), age_k81, c_k81, c_ar40, dar40, sse_k81, sse_dar40, interp_idx, 1
     )
 end
 
@@ -130,6 +136,7 @@ mutable struct BasalMixingModel
     age_k81::Vector{Float64}
     c_k81::Vector{Float64}
     c_ar40::Vector{Float64}
+    dar40::Vector{Float64}
 
     time::Float64
 
@@ -141,6 +148,7 @@ mutable struct BasalMixingModel
 
     rmse_k81::Float64
     time_k81::Float64
+    rmse_dar40::Float64
 end
 
 function BasalMixingModel(;
@@ -151,6 +159,7 @@ function BasalMixingModel(;
     age_k81 = zeros(length(depth)),
     c_k81 = ones(length(depth)),
     c_ar40 = ones(length(depth)),
+    dar40 = zeros(length(depth)),
     time = 0.0
     )
 
@@ -181,12 +190,14 @@ function BasalMixingModel(;
         age_k81,
         c_k81,
         c_ar40,
+        dar40,
         time,
         dRdt_mixing,
         dRdt_decay,
         b1,
         b2,
         1e8,
+        0.0,
         1e8
     )
 end
@@ -202,23 +213,27 @@ function ResetBasalMixingModel!(b)
     b.b1.age_k81 .= 0.0
     b.b1.c_k81 .= 0.0
     b.b1.c_ar40 .= 0.0
-    
+    b.b1.dar40 .= 0.0
+
     b.b2.age_k81 .= 0.0
     b.b2.c_k81 .= 0.0
     b.b2.c_ar40 .= 0.0
+    b.b2.dar40 .= 0.0
     b.b2.sse_k81 .= 0.0
+    b.b2.sse_dar40 .= 0.0
     b.b2.kmin = 1
 
     b.rmse_k81 = 1e8
     b.time_k81 = 0.0 
-    
+    b.rmse_dar40 = 1e8
+
     return
 end
 
 function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     # Extract model parameters
-    (delta, m_clean, f_dirty, t_old) = p
+    (delta, m_clean, f_dirty, t_old, F_ar40) = p
     L_ref = 1.0     # [m] Use L_ref=1.0, since this just scales m_clean, can tune m_clean directly
 
     k81_decay_constant = decay_constant(229.0)
@@ -226,7 +241,8 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     # Extract data for comparison
     (k81, ar40) = dat
     n_obs_k81 = length(k81.age)
-    
+    n_obs_ar40 = length(ar40.var"δ40/38atm")
+
     # Set the mixing rate
     mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
 
@@ -238,7 +254,11 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     ResetBasalMixingModel!(b)
 
     b.c_k81 .= 1.0  # [c/m]
-    #b.c_ar40 = 
+
+    Ar40_00 = calc_ar40_with_aging(0.0, 0.0)    # Modern concentration [cc/m³]
+    b.c_ar40 .= Ar40_00                         # store uniform modern value initially
+    
+    @. b.dar40 = calc_delta_ar40(b.c_ar40, Ar40_00, t_old)
 
     # Loop over time and advance model
     try
@@ -261,6 +281,24 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
             # Get ages too
             @. b.age_k81 = concentration_to_age(b.c_k81,1.0)
+            
+            ## AR40 ##
+            
+            # Ar40 mixing tendency, overwrites b.dRdt_mixing with Ar40 values
+            b.dRdt_mixing .= 0.0
+            @inline mixing_tendency!(b.dRdt_mixing, b.c_ar40, b.mixing_rate, b.thickness; Lref=L_ref)
+            for j in b.jj_clean; b.dRdt_mixing[j] = 0.0; end   # no mixing in clean ice
+
+            # Bottom source flux into the deepest box only
+            b.dRdt_mixing[end] += F_ar40 / b.thickness[end]
+
+            # Advance Ar40
+            @. b.c_ar40 = b.c_ar40 + b.dRdt_mixing * dt
+
+            # Update delta Ar40
+            @. b.dar40 = calc_delta_ar40(b.c_ar40, Ar40_00, t_old)
+
+            ##########
 
             # Update to current time
             b.time = t
@@ -273,6 +311,8 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                     i = findfirst(==(t), b.b1.times)
                     b.b1.age_k81[i,:] = b.age_k81
                     b.b1.c_k81[i,:] = b.c_k81
+                    b.b1.c_ar40[i,:] = b.c_ar40
+                    b.b1.dar40[i,:] = b.dar40
                 end
             end
 
@@ -284,12 +324,12 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                 k1 = round(Int, (t - t0) / 1.0) + 1     # b.b2.time has dt=1.0
 
                 for (i, d) in enumerate(b.b2.depths)
-                    # b.b2.age_k81[i,k] = linterp(b.depth, b.age_k81, d)
-                    # b.b2.c_k81[i,k] = linterp(b.depth, b.c_k81, d)
                     j = b.b2.interp_idx[i]
                     d_frac = (d - b.depth[j]) / (b.depth[j+1] - b.depth[j])
                     b.b2.age_k81[i,k1] = b.age_k81[j] + d_frac * (b.age_k81[j+1] - b.age_k81[j])
                     b.b2.c_k81[i,k1]   = b.c_k81[j]   + d_frac * (b.c_k81[j+1]   - b.c_k81[j])
+                    b.b2.c_ar40[i,k1]  = b.c_ar40[j]  + d_frac * (b.c_ar40[j+1]  - b.c_ar40[j])
+                    b.b2.dar40[i,k1]   = b.dar40[j]   + d_frac * (b.dar40[j+1]   - b.dar40[j])
                 end
                 
                 # Get sum of squared errors over all observations for current time
@@ -298,6 +338,13 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
                     sse += (b.b2.age_k81[i,k1] - k81.age[i])^2
                 end
                 b.b2.sse_k81[k1] = sse
+                
+                # index i doesn't have the right length!
+                # sse = 0.0
+                # for i in 1:n_obs_ar40
+                #     sse += (b.b2.dar40[i,k1] - ar40.var"δ40/38atm"[i])^2
+                # end
+                # b.b2.sse_dar40[k1] = sse
                 
                 # Stop time loop early if sampling and relevant ages are too high already
                 if sampling && minimum(@view b.b2.age_k81[:,k1]) >= 1000
@@ -316,10 +363,11 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     b.b2.kmin = kmin = argmin(b.b2.sse_k81)
     b.rmse_k81 = sqrt(b.b2.sse_k81[kmin]/n_obs_k81)
     b.time_k81 = b.b2.time[kmin]
+    b.rmse_dar40 = sqrt(b.b2.sse_dar40[kmin]/n_obs_ar40)
     
     if !sampling
-        rmse, time, ages = b.rmse_k81, b.time_k81, round.(b.b2.age_k81[:,b.b2.kmin])
-        println("k81 (rmse, time, ages): $rmse, $time, $ages")
+        rmse1, time, rmse2, ages = b.rmse_k81, b.time_k81, b.rmse_dar40, round.(b.b2.age_k81[:,b.b2.kmin])
+        println("k81 (rmse, time, ages): $rmse1, $time, $rmse2, $ages")
     end
 
     return true                 # true = integration succeeded
@@ -429,49 +477,25 @@ function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{
     return
 end
 
-function step_ar40(cc_ar40::Float64, flux::Float64, dt::Float64)
-    return cc_ar40 + flux * dt
+function calc_delta_ar40(ar40::Float64, ar40_ref::Float64, t_kyr)
+    return (ar40 / ar40_ref - 1.0) * 1000.0 - (0.066/1000.0) * max(t_kyr, 0.0)
 end
 
-"""
-    cc_to_delta_ar40(ar40, ar40_ref)
-
-Convert total ⁴⁰Ar content [cc m⁻²] to δ⁴⁰ArATM [‰].
-
-The reference is the atmospheric ⁴⁰Ar content of the ice layer, assuming:
-- 8% total air content by volume
-- atmospheric ⁴⁰Ar fraction of 0.00934 (9340 ppm)
-
-Arguments:
-- `ar40`: total ⁴⁰Ar content [cc m⁻²]
-- `ar40_ref`: total ⁴⁰Ar content [cc m⁻²] at present day
-
-Returns δ⁴⁰ArATM [‰]
-"""
-function cc_to_delta_ar40(ar40::Float64, ar40_ref::Float64)
-    return (ar40 / ar40_ref - 1.0) * 1000.0
-end
-
-# Atmospheric ⁴⁰Ar volume fraction as a function of age:
-f_ar40_atm(t_kyr) = 9340e-6 * (1 - 0.066e-6 * t_kyr)  # returns volume fraction
-
-function calc_ar40_ref(thickness::Float64;
-    t_kyr = 0.0,                        # kyr, for which age do we want the reference?
+function calc_ar40_with_aging(t_kyr::Float64, t_old::Float64;
     air_content::Float64 = 0.08,        # fraction
-    f_ar40_atm::Float64 = 0.00934       # atmospheric ⁴⁰Ar volume fraction
+    f_ar40_atm_pd::Float64 = 0.00934    # atmospheric ⁴⁰Ar volume fraction today
     )
+    # Assumes δ40ar=0, that surface concentration is in equilibrium with the air at that time.
 
-    # Reference ⁴⁰Ar content of the layer [cc m⁻²]
-    # thickness [m] × 1e6 [cc m⁻³ per m] × air_content × f_ar40_atm
-    ar40_ref = thickness * 1e6 * air_content * f_ar40_atm
+    # Reference ⁴⁰Ar content of the layer [cc m⁻³]
+    # volume [100^3 cc m⁻³] × air_content × f_ar40_atm
+    ar40 = 100^3 * (air_content * f_ar40_atm_pd) * (1 - 0.066e-6 * max(t_kyr-t_old, 0.0) )
 
-    return ar40_ref
-end
+    #%% calculate amount of argon (in ccs) starting in ice
+    #TAC=0.08; % average TAC in basal ice
+    #Ar40cc_mod=TAC*.00934*100^3; % ccs of 40 argon per cubic meter for modern ice
 
-function linterp(x, y, xi)
-    i = findlast(x .<= xi)
-    t = (xi - x[i]) / (x[i+1] - x[i])
-    return y[i] + t * (y[i+1] - y[i])
+    return ar40
 end
 
 ### PLOTTING ###
@@ -543,17 +567,24 @@ function plot_BasalMixingModelRun(b;k81=nothing,ar40=nothing)
     errorbars!(ax1, k81.age, -k81.depth, k81.age_hi, k81.age_lo, color=col_k81, direction=:x, whiskerwidth=8)
     scatter!(ax1, k81.age, -k81.depth, color=col_k81, marker=:circle, markersize=12)
     
-    ## PANEL 2 (optional): depth vs d40Ar_ATM concentration
+    ## PANEL 2 (optional): depth vs d40Ar_atm concentration
     if !isnothing(ar40)
         ax3 = Axis(fig[1,end+1], limits=((-0.1,0.62),(-3053,-3035)), xlabel="δ⁴⁰ArATM (‰)", ylabel="Depth (m)" )
         d = collect(-3052:2:-3036)
         ax3.yticks = (d,string.(abs.(d)))
         ax3.xticks = 0.0:0.2:0.6
 
+        # Plot time slices from model
+        for (k, t) in enumerate(b1.times)
+            lines!(ax3,b1.dar40[k,:],-b1.depth,color=:grey50,linewidth=0.5)
+            if t in [500.0,1000.0,1500.0]
+                lines!(ax3,b1.dar40[k,:],-b1.depth,color=:grey50,linewidth=1.5)
+            end
+        end
+
         # Plot data too
         errorbars!(ax3, ar40[!,"δ40/38atm"],-ar40[!,"depth"], ar40[!,"δ40/38atm_err"], ar40[!,"δ40/38atm_err"], color=col_ar40, direction=:x, whiskerwidth=8)
         scatter!(ax3, ar40[!,"δ40/38atm"],-ar40[!,"depth"], color=col_ar40, marker=:circle, markersize=12)
-    
     end
 
     ## PANEL 2 or 3: Closed-system age versus time
