@@ -18,6 +18,8 @@ begin
     #depth, setup = generate_depths("high")
     depth, setup = generate_depths("highdirty";step=0.25)
 
+    (k81_obs, dar40_obs) = load_basalmixing_data(depth=depth) # Load datasets for comparison
+
     p = (
         delta = 1.0,
         m_clean = 0.03,
@@ -26,14 +28,13 @@ begin
         F_ar40 = 0.0075,
     )
 
-    b = BasalMixingModel(depth=depth)
-    (k81, ar40) = load_basalmixing_data(depth=depth) # Load datasets for comparison
+    b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
     
-    RunBasalMixingModel!(p, b, (k81, ar40); dt=0.1, sampling=false)
-    #@btime RunBasalMixingModel!(p, b, (k81, ar40); dt=0.1, sampling=true)
+    RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1, sampling=false)
+    @btime RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1, sampling=true)
 
     # Plot the results
-    fig = plot_BasalMixingModelRun(b; k81=k81, ar40=ar40) #,ar40=ar40_data)
+    fig = plot_BasalMixingModelRun(b; k81_obs=k81_obs, dar40_obs=dar40_obs)
 
 end
 

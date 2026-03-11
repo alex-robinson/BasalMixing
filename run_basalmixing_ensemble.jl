@@ -27,17 +27,17 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
 end
 
 priors = (
-    delta       = Uniform(0.1, 2.0),    # 1 m
-    m_clean     = truncated(Normal(0.03, 0.02), lower=0.0), # 0.03 m/kyr
-    f_dirty     = Uniform(4.0, 8.0),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
-    t_old       = Normal(250.0,100.0),  # 250 kyr
-    F_ar40      = Uniform(0.0,0.1), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
+    delta       = Uniform(0.3, 2.0),    # 1 m
+    m_clean     = truncated(Normal(0.03, 0.005), lower=0.0), # 0.03 m/kyr
+    f_dirty     = Uniform(4.0, 7.0),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
+    t_old       = truncated(Normal(250.0,50.0), lower=0.0),  # 250 kyr
+    F_ar40      = Uniform(0.003,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
     #σ_k81           = Exponential(30.0),    # 30 kyr
     #t_old = 250.0,
     σ_k81 = 30.0,
     σ_dar40 = 0.03,
 
-    time_pred   = Uniform(0.0,3000.0),  # Anything is possible
+    time_pred   = Uniform(700.0,3000.0),  # Anything is possible
 )
 
 @model function basal_mixing(k81_age_obs, dar40_obs, b, dat, dt, priors)
@@ -51,11 +51,6 @@ priors = (
     σ_k81   = priors.σ_k81   isa Distribution ? σ_k81   ~ priors.σ_k81   : priors.σ_k81
     σ_dar40 = priors.σ_dar40 isa Distribution ? σ_dar40 ~ priors.σ_dar40 : priors.σ_dar40
 
-    ## Extract obs ##
-    (k81, ar40) = dat
-    #k81_age_obs = k81.age              # Must be passed in separately as a vector to be sampled
-    #dar40_obs = ar40.dar40             # Must be passed in separately as a vector to be sampled
-
     # Run the model
     p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old, F_ar40=F_ar40)
     success = RunBasalMixingModel!(p, b, dat; dt=dt, sampling=true)
@@ -67,10 +62,10 @@ priors = (
 
     if success
         # Extract the best-fit ages at the optimal time
-        kmin = b.kmin
-        time_pred := b.b2.time[kmin]
-        k81_age_pred  := b.b2.age_k81[:,kmin]
-        dar40_pred := b.b3.dar40[:,kmin]
+        kmin = b.joint.kmin
+        time_pred := b.joint.time_min
+        k81_age_pred  := b.k81.dat[:,kmin]
+        dar40_pred := b.dar40.dat[:,kmin]
     else
         # Assign a very high age so that Likelihood is very low
         time_pred := 0.0
@@ -91,10 +86,10 @@ end
 ## SCRIPT ##
 
 depth, setup = generate_depths("highdirty";step=0.25)
-b = BasalMixingModel(depth=depth)
-(k81, ar40) = load_basalmixing_data(depth=b.depth)
+(k81, dar40) = load_basalmixing_data(depth=b.depth)
+b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
 
-model = basal_mixing(k81.age, ar40.dar40, b, (k81, ar40), 0.2, priors)
+model = basal_mixing(k81.age, dar40.dar40, b, (k81, dar40), 0.2, priors)
 
 # Sample using Metropolis Hastings (MH)
 chain = sample(model, MH(), MCMCThreads(), 1_000, 4)  # 4 chains in parallel
@@ -103,8 +98,8 @@ chain = sample(model, MH(), MCMCThreads(), 1_000, 4)  # 4 chains in parallel
 
 begin
     df = DataFrame(chain)
-    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
-    labels = ["delta (m)", "m_clean (m/yr)", "f_dirty", "t_old (kyr)", "F_ar40 (m^3/kyr)", "time_pred (kyr)"]
+    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred] 
+    labels = ["delta (m)", "m_clean (m/yr)", "f_dirty", "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "time_pred (kyr)"]
     best_idx = argmax(df.logjoint)
 
     describe(chain)
@@ -120,12 +115,12 @@ begin
         F_ar40  = df.F_ar40[best_idx],
     )
 
-    b = BasalMixingModel(depth=depth)
+    b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
 
-    RunBasalMixingModel!(p, b, (k81, ar40); dt=0.1, sampling=false)
+    RunBasalMixingModel!(p, b, (k81, dar40); dt=0.1, sampling=false)
 
     # Plot the results
-    fig = plot_BasalMixingModelRun(b; k81=k81,ar40=ar40)
+    fig = plot_BasalMixingModelRun(b; k81_obs=k81,dar40_obs=dar40)
     display(fig)
     mysave(plt_prefix()*"mixingmodel-ens-best.png",fig)
 end
@@ -169,3 +164,14 @@ begin
     display(fig)
     mysave(plt_prefix()*"mixingmodel-ens-hist.png",fig)
 end
+
+
+
+
+# Fraction of accepted proposals (non-repeated rows) per parameter
+function acceptance_rate(chain)
+    θ = Array(chain)  # samples × parameters matrix
+    mean(any(diff(θ, dims=1) .!= 0, dims=2))
+end
+
+acceptance_rate(chain)
