@@ -28,10 +28,10 @@ end
 
 priors = (
     delta       = Uniform(0.3, 2.0),    # 1 m
-    m_clean     = truncated(Normal(0.03, 0.005), lower=0.0), # 0.03 m/kyr
-    f_dirty     = Uniform(4.0, 7.0),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
-    t_old       = truncated(Normal(250.0,50.0), lower=0.0),  # 250 kyr
-    F_ar40      = Uniform(0.003,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
+    m_clean     = truncated(Normal(0.03, 0.002), lower=0.0), # 0.03 m/kyr
+    f_dirty     = Uniform(4.0, 6.5),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
+    t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
+    F_ar40      = Uniform(0.004,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
     #σ_k81           = Exponential(30.0),    # 30 kyr
     #t_old = 250.0,
     σ_k81 = 30.0,
@@ -92,7 +92,7 @@ b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=d
 model = basal_mixing(k81.age, dar40.dar40, b, (k81, dar40), 0.2, priors)
 
 # Sample using Metropolis Hastings (MH)
-chain = sample(model, MH(), MCMCThreads(), 1_000, 4)  # 4 chains in parallel
+chain = sample(model, MH(), MCMCThreads(), 10_000, 4)  # 4 chains in parallel
 
 ## Analysis
 
