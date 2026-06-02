@@ -11,21 +11,14 @@ using LinearAlgebra
 using Random
 
 using Dates
-using CairoMakie
 using CSV
 using DataFrames
+using JLD2
 
 Random.seed!(42)
 
 # Include code for basal mixing model
 include("BasalMixingModel.jl")
-
-function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
-    # Works for any Distributions.jl type
-    lo, hi = quantile(prior, 0.001), quantile(prior, 0.999)
-    x = range(lo, hi, length=300)
-    lines!(ax, x, pdf.(prior, x); color=color, kwargs...)
-end
 
 """
     tuned_mh(priors; var_linked=0.1, variances=NamedTuple())
@@ -56,17 +49,28 @@ end
 """
     acceptance_rate(chain)
 
-Mean acceptance rate. Uses the chain's `:accepted` flag if present
-(FlexiChain default in Turing >= 0.42); otherwise falls back to counting
-non-repeated rows in the raw sample matrix.
+Mean acceptance rate. Uses the chain's `:accepted` flag if present and
+populated (FlexiChain default in Turing >= 0.42); otherwise falls back to
+counting non-repeated rows in the raw sample matrix. Returns a `Float64`,
+never `missing` — some samplers (notably `Emcee`) store `Vector{Missing}`
+for `:accepted` and we don't want that to crash downstream printing.
 """
 function acceptance_rate(chain)
     try
-        return mean(chain[:accepted])
+        a = chain[:accepted]
+        # FlexiChain returns a DimArray; some samplers populate it with `missing`.
+        v = collect(skipmissing(vec(a)))
+        if !isempty(v)
+            return mean(v)
+        end
     catch
-        θ = Array(chain)
+        # fall through to row-diff fallback below
+    end
+    θ = Array(chain)
+    if ndims(θ) >= 2 && size(θ, 1) > 1
         return mean(any(diff(θ, dims=1) .!= 0, dims=2))
     end
+    return NaN
 end
 
 priors = (
@@ -144,19 +148,28 @@ bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=d
 model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
 
 ## Sampler selection ##
-# :mh_default  -> Turing's default MH (uses priors as proposals; explores poorly here)
-# :mh_tuned    -> MH with per-parameter Gaussian random-walk proposals scaled
-#                 from each prior's std. Tune `scale_frac` (or pass `scales=...`)
-#                 to target ~25-40% acceptance.
-# :mh_ram      -> Robust Adaptive Metropolis (Vihola 2012): online-adapts the
-#                 full proposal covariance toward target acceptance α.
-#                 Should fix patchy posteriors without manual tuning.
 # :emcee       -> Affine-invariant ensemble sampler (Goodman & Weare). Robust to
 #                 correlations, no per-parameter tuning, no gradients required.
-sampler_choice = :mh_ram
+#                 In informal comparisons here, the only sampler that hits
+#                 textbook ~25-40% acceptance and fills out the posterior. Slower
+#                 per sample than the MH variants (serial over walkers), but
+#                 wall-clock comparable for the same effective sample size.
+#                 Default.
+# :mh_ram      -> Robust Adaptive Metropolis (Vihola 2012): online-adapts the
+#                 full proposal covariance toward target acceptance α. Needs a
+#                 calibrated initial S (or many iterations) to be competitive;
+#                 with default S=I its acceptance can stay near 0 for thousands
+#                 of iterations.
+# :mh_tuned    -> MH with per-parameter LinkedRW proposals. Tune `var_linked`
+#                 (or pass `mh_variances=...`) toward ~25-40% acceptance.
+# :mh_default  -> Turing's default MH (uses priors as proposals; explores poorly here).
+sampler_choice = :emcee
 
-n_samples = 10_000
+n_samples = 10_000   # used for the MH variants; per-chain count
 n_chains  = 4
+
+# Where to persist the sampled chain (set to nothing to skip saving).
+results_path = "results/emcee-chain.jld2"
 
 # Optional per-parameter linked-space variance overrides for :mh_tuned
 # (target ~25-40% acceptance). Leave NamedTuple() to use var_linked for all.
@@ -183,89 +196,35 @@ elseif sampler_choice === :mh_ram
     chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
 elseif sampler_choice === :emcee
     # Emcee runs a single ensemble of walkers; n_walkers >= 2 * n_sampled_params.
-    # Total draws = n_walkers * n_samples.
+    # Total draws = n_walkers * n_iter. Currently no MCMCThreads() support in
+    # Turing's Emcee, so wall-clock is serial over walkers.
     n_walkers = 32
+    n_iter    = 500
     spl = Emcee(n_walkers, 2.0)
-    chain = sample(model, spl, n_samples)
+    chain = sample(model, spl, n_iter)
 else
     error("Unknown sampler_choice: $sampler_choice")
 end
 
 println("Sampler: $sampler_choice  |  acceptance ≈ ", round(acceptance_rate(chain), digits=3))
 
-## Analysis
-
-begin
-    df = DataFrame(chain)
-    # FlexiChain (Turing >= 0.42) doesn't expose logjoint/accepted as DataFrame
-    # columns by default — they're in the chain's "Extras" namespace. Pull them in
-    # explicitly so existing analysis (argmax logjoint, etc.) keeps working.
-    df.logjoint = vec(chain[:logjoint])
-    df.accepted = vec(chain[:accepted])
-
-    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
-    labels = ["delta (m)", "m_clean (m/yr)", "f_dirty", "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "time_pred (kyr)"]
-    best_idx = argmax(df.logjoint)
-
-    describe(chain)
+## Persist the chain for downstream plotting / reanalysis.
+if results_path !== nothing
+    mkpath(dirname(results_path))
+    JLD2.jldsave(results_path;
+                 chain, k81, dar40, depth, setup, priors, sampler_choice)
+    println("Saved chain to ", results_path)
 end
 
+## Quick summary (full plotting lives in plot_basalmixing_ensemble.jl):
+##
+##     include("plot_basalmixing_ensemble.jl")
+##     plot_ensemble_from_workspace()         # uses chain/k81/dar40/depth/priors from Main
+##     # or, separately, after restarting Julia:
+##     plot_ensemble("results/emcee-chain.jld2")
 
-begin
-    p = (
-        delta   = df.delta[best_idx],
-        m_clean = df.m_clean[best_idx],
-        f_dirty = df.f_dirty[best_idx],
-        t_old   = df.t_old[best_idx],
-        F_ar40  = df.F_ar40[best_idx],
-    )
-
-    b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
-
-    RunBasalMixingModel!(p, b, (k81, dar40); dt=0.1, sampling=false)
-
-    # Plot the results
-    fig = plot_BasalMixingModelRun(b; k81_obs=k81,dar40_obs=dar40)
-    display(fig)
-    mysave(plt_prefix()*"mixingmodel-ens-best.png",fig)
-end
-
-begin
-    fig = Figure(size=(900, 700))
-
-    ipar = 0
-    for (i, (param, label)) in enumerate(zip(params, labels))
-        if string(param) in names(df)
-            ipar += 1
-            row, col = divrem(ipar-1, 2)
-            ax = Axis(fig[row+1, col+1], xlabel=label, ylabel="log p")
-            ylims!(ax,(-50,0))
-            scatter!(ax, df[!, param], df.logjoint, alpha=0.6, markersize=6, color=:steelblue)
-            # Highlight best point in red
-            scatter!(ax, [df[best_idx, param]], [df.logjoint[best_idx]], 
-                    color=:red, markersize=12, label="MAP")
-        end
-    end
-
-    display(fig)
-    mysave(plt_prefix()*"mixingmodel-ens-logp.png",fig)
-end
-
-begin
-    fig = Figure(size=(900, 700))
-
-    ipar = 0
-    for (i, (param, label)) in enumerate(zip(params, labels))
-        if string(param) in names(df)
-            ipar += 1
-            row, col = divrem(ipar-1, 2)
-            ax = Axis(fig[row+1, col+1], xlabel=label, ylabel="density")
-            hist!(ax, df[!, param], bins=20, normalization=:pdf, color=(:steelblue, 0.7))
-            plot_prior_line!(ax, priors[param], label="Prior", linewidth=2, color=:grey50)
-            vlines!(ax, [df[best_idx, param]], color=:red, linewidth=2, label="MAP")
-        end
-    end
-
-    display(fig)
-    mysave(plt_prefix()*"mixingmodel-ens-hist.png",fig)
-end
+df = DataFrame(chain)
+df.logjoint = vec(chain[:logjoint])
+best_idx = argmax(df.logjoint)
+@info "MAP (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]]
+describe(chain)
