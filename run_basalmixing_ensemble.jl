@@ -6,6 +6,7 @@ import Pkg; Pkg.activate(".")
 using Revise
 
 using Turing
+const AMH = Turing.Inference.AdvancedMH   # AdvancedMH is a Turing dep; reach it via Turing
 using LinearAlgebra
 using Random
 
@@ -24,6 +25,48 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
     lo, hi = quantile(prior, 0.001), quantile(prior, 0.999)
     x = range(lo, hi, length=300)
     lines!(ax, x, pdf.(prior, x); color=color, kwargs...)
+end
+
+"""
+    tuned_mh(priors; var_linked=0.1, variances=NamedTuple())
+
+Build a Turing `MH` sampler with a `LinkedRW(σ²)` proposal for every prior in
+`priors` that is a `Distribution`. `LinkedRW` performs the random walk in
+unconstrained (linked) space, so bounded priors (Uniform, truncated) stay in
+support automatically. `σ²` is the proposal variance *in linked space*.
+
+For Uniform(a,b) the link is logit((x-a)/(b-a)); for truncated lower-bounded
+distributions the link is roughly log(x-lower). A `var_linked` of 0.05-0.25 is
+a reasonable starting range; tune toward ~25-40% acceptance.
+
+Override individual parameters via `variances=(:delta=0.04, ...)`.
+"""
+function tuned_mh(priors; var_linked::Float64=0.1, variances::NamedTuple=NamedTuple())
+    props = Pair{Symbol,Any}[]
+    LinkedRW = Turing.Inference.LinkedRW
+    for name in keys(priors)
+        prior = getfield(priors, name)
+        prior isa Distribution || continue
+        v = haskey(variances, name) ? variances[name] : var_linked
+        push!(props, name => LinkedRW(v))
+    end
+    return MH(props...)
+end
+
+"""
+    acceptance_rate(chain)
+
+Mean acceptance rate. Uses the chain's `:accepted` flag if present
+(FlexiChain default in Turing >= 0.42); otherwise falls back to counting
+non-repeated rows in the raw sample matrix.
+"""
+function acceptance_rate(chain)
+    try
+        return mean(chain[:accepted])
+    catch
+        θ = Array(chain)
+        return mean(any(diff(θ, dims=1) .!= 0, dims=2))
+    end
 end
 
 priors = (
@@ -92,20 +135,75 @@ depth, setup = generate_depths("highdirty";step=0.25)
 (k81, dar40) = load_basalmixing_data(depth=depth)
 
 # Allocate one BasalMixingModel per thread to avoid concurrent mutation of shared buffers
-# when MCMCThreads() runs chains in parallel. The @model picks bs[Threads.threadid()].
+# when MCMCThreads() runs chains in parallel. Size by maxthreadid() — Julia >= 1.9 may
+# return threadids beyond nthreads(:default) for interactive threads, and tasks can
+# migrate between threads, so the indexed slot must always exist.
 bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
-      for _ in 1:Threads.nthreads()]
+      for _ in 1:Threads.maxthreadid()]
 
 model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
 
-# Sample using Metropolis Hastings (MH)
-chain = sample(model, MH(), MCMCThreads(), 10_000, 4)  # 4 chains in parallel
+## Sampler selection ##
+# :mh_default  -> Turing's default MH (uses priors as proposals; explores poorly here)
+# :mh_tuned    -> MH with per-parameter Gaussian random-walk proposals scaled
+#                 from each prior's std. Tune `scale_frac` (or pass `scales=...`)
+#                 to target ~25-40% acceptance.
+# :mh_ram      -> Robust Adaptive Metropolis (Vihola 2012): online-adapts the
+#                 full proposal covariance toward target acceptance α.
+#                 Should fix patchy posteriors without manual tuning.
+# :emcee       -> Affine-invariant ensemble sampler (Goodman & Weare). Robust to
+#                 correlations, no per-parameter tuning, no gradients required.
+sampler_choice = :mh_ram
+
+n_samples = 10_000
+n_chains  = 4
+
+# Optional per-parameter linked-space variance overrides for :mh_tuned
+# (target ~25-40% acceptance). Leave NamedTuple() to use var_linked for all.
+mh_variances = NamedTuple()
+# Example: mh_variances = (delta=0.05, m_clean=0.1, f_dirty=0.1, t_old=0.1, F_ar40=0.1)
+
+if sampler_choice === :mh_default
+    spl = MH()
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :mh_tuned
+    spl = tuned_mh(priors; var_linked=0.1, variances=mh_variances)
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :mh_ram
+    # α=0.234 is the asymptotically optimal RWMH acceptance rate for d>=5.
+    # γ in (0.5, 1] controls the adaptation step; 2/3 is the default.
+    # AutoFiniteDiff is used only for the initial-param-finding check (RAM
+    # itself is gradient-free). ForwardDiff would propagate Duals through the
+    # model's try/catch + mutating buffers and fail; FiniteDiff just calls the
+    # log-density at real-valued points.
+    spl = externalsampler(
+        AMH.RobustAdaptiveMetropolis(; α=0.234, γ=2/3);
+        adtype=Turing.ADTypes.AutoFiniteDiff(),
+    )
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :emcee
+    # Emcee runs a single ensemble of walkers; n_walkers >= 2 * n_sampled_params.
+    # Total draws = n_walkers * n_samples.
+    n_walkers = 32
+    spl = Emcee(n_walkers, 2.0)
+    chain = sample(model, spl, n_samples)
+else
+    error("Unknown sampler_choice: $sampler_choice")
+end
+
+println("Sampler: $sampler_choice  |  acceptance ≈ ", round(acceptance_rate(chain), digits=3))
 
 ## Analysis
 
 begin
     df = DataFrame(chain)
-    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred] 
+    # FlexiChain (Turing >= 0.42) doesn't expose logjoint/accepted as DataFrame
+    # columns by default — they're in the chain's "Extras" namespace. Pull them in
+    # explicitly so existing analysis (argmax logjoint, etc.) keeps working.
+    df.logjoint = vec(chain[:logjoint])
+    df.accepted = vec(chain[:accepted])
+
+    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
     labels = ["delta (m)", "m_clean (m/yr)", "f_dirty", "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "time_pred (kyr)"]
     best_idx = argmax(df.logjoint)
 
@@ -171,14 +269,3 @@ begin
     display(fig)
     mysave(plt_prefix()*"mixingmodel-ens-hist.png",fig)
 end
-
-
-
-
-# Fraction of accepted proposals (non-repeated rows) per parameter
-function acceptance_rate(chain)
-    θ = Array(chain)  # samples × parameters matrix
-    mean(any(diff(θ, dims=1) .!= 0, dims=2))
-end
-
-acceptance_rate(chain)
