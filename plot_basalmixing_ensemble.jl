@@ -17,12 +17,10 @@
 ##
 ##     julia --project=. plot_basalmixing_ensemble.jl results/emcee-chain.jld2
 
-# If invoked as a script (julia plot_basalmixing_ensemble.jl ...), activate the
-# project. When `include`d inside an existing session, leave the active env alone.
-if abspath(PROGRAM_FILE) == @__FILE__
-    cd(@__DIR__)
-    import Pkg; Pkg.activate(".")
-end
+## Preamble #############################################
+cd(@__DIR__)
+import Pkg; Pkg.activate(".")
+#########################################################
 
 using JLD2
 using DataFrames
@@ -40,25 +38,7 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
     lines!(ax, x, pdf.(prior, x); color=color, kwargs...)
 end
 
-"""
-    load_ensemble_results(path::String) -> NamedTuple
 
-Read a JLD2 snapshot written by `run_basalmixing_ensemble.jl`. Returns a
-NamedTuple with `(chain, k81, dar40, depth, setup, priors, sampler_choice)`.
-"""
-function load_ensemble_results(path::String)
-    isfile(path) || error("ensemble results file not found: $path")
-    JLD2.jldopen(path, "r") do f
-        chain = f["chain"]
-        k81 = f["k81"]
-        dar40 = f["dar40"]
-        depth = f["depth"]
-        setup = haskey(f, "setup") ? f["setup"] : ""
-        priors = f["priors"]
-        sampler_choice = haskey(f, "sampler_choice") ? f["sampler_choice"] : :unknown
-        return (; chain, k81, dar40, depth, setup, priors, sampler_choice)
-    end
-end
 
 """
     plot_ensemble(path::String; kwargs...)
@@ -206,3 +186,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
     path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain.jld2"
     plot_ensemble(path)
 end
+
+path = "results/emcee-chain.jld2"
+plot_ensemble(path)

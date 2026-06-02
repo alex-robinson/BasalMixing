@@ -209,12 +209,8 @@ end
 println("Sampler: $sampler_choice  |  acceptance ≈ ", round(acceptance_rate(chain), digits=3))
 
 ## Persist the chain for downstream plotting / reanalysis.
-if results_path !== nothing
-    mkpath(dirname(results_path))
-    JLD2.jldsave(results_path;
+save_ensemble_results(results_path;
                  chain, k81, dar40, depth, setup, priors, sampler_choice)
-    println("Saved chain to ", results_path)
-end
 
 ## Quick summary (full plotting lives in plot_basalmixing_ensemble.jl):
 ##
