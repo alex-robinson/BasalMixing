@@ -1,5 +1,6 @@
 using CairoMakie
 using DifferentialEquations
+using JLD2
 using LinearAlgebra
 
 function plt_prefix(;path="plots")
@@ -677,4 +678,43 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
     hspan!(ax2, k81_obs.age .- k81_obs.age_lo, k81_obs.age .+ k81_obs.age_hi; color=col_k81_transparent)
 
     return fig
+end
+
+"""
+    save_ensemble_results(path; chain, k81, dar40, depth, setup, priors, sampler_choice)
+
+Persist a sampled ensemble to a JLD2 file. If `path === nothing`, no-op. Pass
+all other arguments as keywords. Companion to `load_ensemble_results`.
+"""
+function save_ensemble_results(path; chain, k81, dar40, depth, setup, priors, sampler_choice)
+    if path === nothing
+        println("Chain not saved - no path given.")
+        return
+    end
+    mkpath(dirname(path))
+    JLD2.jldsave(path;
+                 chain, k81, dar40, depth, setup, priors, sampler_choice)
+    println("Saved chain to ", path)
+    return
+end
+
+
+"""
+    load_ensemble_results(path::String) -> NamedTuple
+
+Read a JLD2 snapshot written by `run_basalmixing_ensemble.jl`. Returns a
+NamedTuple with `(chain, k81, dar40, depth, setup, priors, sampler_choice)`.
+"""
+function load_ensemble_results(path::String)
+    isfile(path) || error("ensemble results file not found: $path")
+    JLD2.jldopen(path, "r") do f
+        chain = f["chain"]
+        k81 = f["k81"]
+        dar40 = f["dar40"]
+        depth = f["depth"]
+        setup = haskey(f, "setup") ? f["setup"] : ""
+        priors = f["priors"]
+        sampler_choice = haskey(f, "sampler_choice") ? f["sampler_choice"] : :unknown
+        return (; chain, k81, dar40, depth, setup, priors, sampler_choice)
+    end
 end
