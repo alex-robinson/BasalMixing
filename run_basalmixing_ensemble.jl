@@ -40,7 +40,7 @@ priors = (
     time_pred   = Uniform(700.0,3000.0),  # Anything is possible
 )
 
-@model function basal_mixing(k81_age_obs, dar40_obs, b, dat, dt, priors)
+@model function basal_mixing(k81_age_obs, dar40_obs, bs, dat, dt, priors)
 
     ## Set priors ##
     delta   = priors.delta   isa Distribution ? delta   ~ priors.delta   : priors.delta
@@ -50,6 +50,9 @@ priors = (
     F_ar40  = priors.F_ar40  isa Distribution ? F_ar40  ~ priors.F_ar40  : priors.F_ar40
     σ_k81   = priors.σ_k81   isa Distribution ? σ_k81   ~ priors.σ_k81   : priors.σ_k81
     σ_dar40 = priors.σ_dar40 isa Distribution ? σ_dar40 ~ priors.σ_dar40 : priors.σ_dar40
+
+    # Pick this thread's private model state so concurrent chains don't trash each other's buffers.
+    b = bs[Threads.threadid()]
 
     # Run the model
     p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old, F_ar40=F_ar40)
@@ -86,10 +89,14 @@ end
 ## SCRIPT ##
 
 depth, setup = generate_depths("highdirty";step=0.25)
-(k81, dar40) = load_basalmixing_data(depth=b.depth)
-b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
+(k81, dar40) = load_basalmixing_data(depth=depth)
 
-model = basal_mixing(k81.age, dar40.dar40, b, (k81, dar40), 0.2, priors)
+# Allocate one BasalMixingModel per thread to avoid concurrent mutation of shared buffers
+# when MCMCThreads() runs chains in parallel. The @model picks bs[Threads.threadid()].
+bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
+      for _ in 1:Threads.nthreads()]
+
+model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
 
 # Sample using Metropolis Hastings (MH)
 chain = sample(model, MH(), MCMCThreads(), 10_000, 4)  # 4 chains in parallel
@@ -115,7 +122,7 @@ begin
         F_ar40  = df.F_ar40[best_idx],
     )
 
-    b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
+    b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
 
     RunBasalMixingModel!(p, b, (k81, dar40); dt=0.1, sampling=false)
 

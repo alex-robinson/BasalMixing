@@ -598,8 +598,8 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
     col_k81 = ["#487E3D","#8080F7","teal"]
     col_k81_transparent = [(c, 0.2) for c in col_k81]
     col_dar40 = "#BC401E"
-    
-    if !isnothing(ar40)
+
+    if !isnothing(dar40_obs)
         fig = Figure(size=(1000,600))
     else
         fig = Figure(size=(700,600))
@@ -642,7 +642,7 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
     scatter!(ax1, k81_obs.age, -k81_obs.depth, color=col_k81, marker=:circle, markersize=12)
     
     ## PANEL 2 (optional): depth vs d40Ar_atm concentration
-    if !isnothing(ar40)
+    if !isnothing(dar40_obs)
         ax3 = Axis(fig[1,end+1], limits=((-0.1,0.62),(-3053,-3035)), xlabel="δ⁴⁰ArATM (‰)", ylabel="Depth (m)" )
         d = collect(-3052:2:-3036)
         ax3.yticks = (d,string.(abs.(d)))
