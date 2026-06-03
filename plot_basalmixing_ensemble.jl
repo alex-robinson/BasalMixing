@@ -78,7 +78,7 @@ function plot_ensemble(;
 
     params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
     labels = ["delta (m)", "m_clean (m/yr)", "f_dirty",
-              "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "t_0 (kyr BP, negative = past)"]
+              "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "t_0 (kyr)"]
     best_idx = argmax(df.logjoint)
 
     ## Best-fit depth profiles ##
@@ -308,7 +308,7 @@ function plot_derived_time(results::NamedTuple;
 
     fig = Figure(size=(720, 420))
     ax  = Axis(fig[1, 1];
-               xlabel = "t_0 (kyr BP, negative = past)",
+               xlabel = "t_0 (kyr)",
                ylabel = "density (1/kyr)",
                title  = "$(label_kind) posterior on t_0  (model_kind=:$model_kind)")
     lines!(ax, d.t_grid, d.p_t; linewidth=2, color=:steelblue)
