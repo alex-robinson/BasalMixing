@@ -90,20 +90,25 @@ function plot_ensemble(;
         F_ar40  = df.F_ar40[best_idx],
     )
     b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
-    # Profile run fills b.states (grey time slices) and b.k81/b.dar40 (right panel's
-    # dense time series). The predictions at t = sampled MAP t_0 are the same
-    # values, just on this dense grid — what changes between :profile and :sampled
-    # is only which time we annotate as "best".
-    RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, sampling=false)
+    # For :profile and :marginal the best-fit run integrates the full 0 → 3000 kyr
+    # so the time-series panel can show the dense trajectory the sampler
+    # actually used (profile picks argmin-RMSE; marginal integrates L(t)).
+    # For :sampled the sampler only ever evaluated the likelihood at the
+    # single endpoint t = |t_0|, so we integrate exactly 0 → |t_0| and
+    # crop the right-panel display to match. No extrapolation past the
+    # inference endpoint t_end = 0.
     if model_kind === :sampled
-        # Chain stores t_0 in signed kyr BP; b.*.time_min holds positive
-        # elapsed time, so flip the sign before annotating the trajectory.
         t_elapsed_map = -df.t_0[best_idx]
+        RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, t1=t_elapsed_map, sampling=false)
+        # Override argmin-RMSE: the inference time is the endpoint, by construction.
         b.k81.time_min   = t_elapsed_map
         b.dar40.time_min = t_elapsed_map
         b.joint.time_min = t_elapsed_map
+        fig_best = plot_BasalMixingModelRun(b; k81_obs=k81, dar40_obs=dar40, t_max=t_elapsed_map)
+    else
+        RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, sampling=false)
+        fig_best = plot_BasalMixingModelRun(b; k81_obs=k81, dar40_obs=dar40)
     end
-    fig_best = plot_BasalMixingModelRun(b; k81_obs=k81, dar40_obs=dar40)
 
     ## log-posterior scatter ##
     fig_logp = Figure(size=(900, 700))

@@ -859,12 +859,20 @@ function add_clean_dirty_boundary!(ax,x, y; with_label=true)
 
     return
 end
-function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
+function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing)
 
     states = b.states
     k81 = b.k81
     dar40 = b.dar40
     joint = b.joint
+
+    # Optional truncation. When the integration only covered 0 → t_max
+    # (e.g. the :sampled model_kind runs to |t_0|), restrict the time-series
+    # panel and the state-snapshot panels to that range to avoid showing
+    # uninitialised buffer tails as a misleading zero trajectory.
+    t_max_val = t_max === nothing ? Float64(k81.time[end]) : Float64(t_max)
+    k_last_pred  = searchsortedlast(k81.time, t_max_val)
+    k_last_state = searchsortedlast(states.time, t_max_val)
 
     col_k81 = ["#487E3D","#8080F7","teal"]
     col_k81_transparent = [(c, 0.2) for c in col_k81]
@@ -899,13 +907,14 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
     hlines!(ax1,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
     
     # Plot time slices from model
-    for (k, t) in enumerate(states.time)
+    for k in 1:k_last_state
+        t = states.time[k]
         lines!(ax1,states.age_k81[:,k],-b.depth,color=:grey50,linewidth=0.5)
         if t in [500.0,1000.0,1500.0]
             lines!(ax1,states.age_k81[:,k],-b.depth,color=:grey50,linewidth=1.5)
         end
     end
-    k = argmin(abs.(states.time .- joint.time_min))
+    k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
     lines!(ax1,states.age_k81[:,k],-b.depth,color=:black,linewidth=2)
 
     # Plot data too
@@ -920,13 +929,14 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
         ax3.xticks = 0.0:0.2:0.6
 
         # Plot time slices from model
-        for (k, t) in enumerate(states.time)
+        for k in 1:k_last_state
+            t = states.time[k]
             lines!(ax3,states.dar40[:,k],-b.depth,color=:grey50,linewidth=0.5)
             if t in [500.0,1000.0,1500.0]
                 lines!(ax3,states.dar40[:,k],-b.depth,color=:grey50,linewidth=1.5)
             end
         end
-        k = argmin(abs.(states.time .- joint.time_min))
+        k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
         lines!(ax3,states.dar40[:,k],-b.depth,color=:black,linewidth=2.5)
 
         # Plot data too
@@ -935,12 +945,14 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
     end
 
     ## PANEL 2 or 3: Closed-system age versus time
-    ax2 = Axis(fig[1,end+1], limits=((0,3000),(0,900)), xlabel="Time (kyr)", ylabel="⁸¹K closed system age (kyr)" )
-    ax2.xticks = [0,1000,2000,3000]
+    x_hi = ceil(t_max_val / 500) * 500   # round up to nearest 500 kyr for clean tick spacing
+    x_hi = max(x_hi, 500.0)
+    ax2 = Axis(fig[1,end+1], limits=((0,x_hi),(0,900)), xlabel="Time (kyr)", ylabel="⁸¹K closed system age (kyr)" )
+    ax2.xticks = collect(0:1000:x_hi)
     ax2.yticks = 0:100:900
 
     for (j,d) in enumerate(k81.depth)
-        lines!(ax2,k81.time,k81.dat[j,:],color=col_k81[j],linewidth=2)
+        lines!(ax2,k81.time[1:k_last_pred],k81.dat[j,1:k_last_pred],color=col_k81[j],linewidth=2)
     end
 
     # Plot closed-system age from data
