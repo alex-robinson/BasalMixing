@@ -765,19 +765,28 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing)
 end
 
 """
-    save_ensemble_results(path; chain, k81, dar40, depth, setup, priors, sampler_choice)
+    save_ensemble_results(path; chain, k81, dar40, depth, setup, priors,
+                                sampler_choice, model_kind=:profile)
 
 Persist a sampled ensemble to a JLD2 file. If `path === nothing`, no-op. Pass
 all other arguments as keywords. Companion to `load_ensemble_results`.
+
+`model_kind` records which `@model` produced the chain (`:profile` or
+`:sampled`) — `plot_ensemble` uses this to decide whether the MAP best-fit
+re-run should integrate to t1=3000 and pick `argmin(rmse)` (profile) or
+integrate exactly to the chain's MAP `time_pred` (sampled). Defaults to
+`:profile` for backwards compatibility with pre-existing snapshots.
 """
-function save_ensemble_results(path; chain, k81, dar40, depth, setup, priors, sampler_choice)
+function save_ensemble_results(path; chain, k81, dar40, depth, setup, priors,
+                               sampler_choice, model_kind::Symbol=:profile)
     if path === nothing
         println("Chain not saved - no path given.")
         return
     end
     mkpath(dirname(path))
     JLD2.jldsave(path;
-                 chain, k81, dar40, depth, setup, priors, sampler_choice)
+                 chain, k81, dar40, depth, setup, priors,
+                 sampler_choice, model_kind)
     println("Saved chain to ", path)
     return
 end
@@ -787,7 +796,9 @@ end
     load_ensemble_results(path::String) -> NamedTuple
 
 Read a JLD2 snapshot written by `run_basalmixing_ensemble.jl`. Returns a
-NamedTuple with `(chain, k81, dar40, depth, setup, priors, sampler_choice)`.
+NamedTuple with `(chain, k81, dar40, depth, setup, priors, sampler_choice,
+model_kind)`. Old snapshots that pre-date the `model_kind` field default to
+`:profile`.
 """
 function load_ensemble_results(path::String)
     isfile(path) || error("ensemble results file not found: $path")
@@ -799,6 +810,7 @@ function load_ensemble_results(path::String)
         setup = haskey(f, "setup") ? f["setup"] : ""
         priors = f["priors"]
         sampler_choice = haskey(f, "sampler_choice") ? f["sampler_choice"] : :unknown
-        return (; chain, k81, dar40, depth, setup, priors, sampler_choice)
+        model_kind = haskey(f, "model_kind") ? f["model_kind"] : :profile
+        return (; chain, k81, dar40, depth, setup, priors, sampler_choice, model_kind)
     end
 end

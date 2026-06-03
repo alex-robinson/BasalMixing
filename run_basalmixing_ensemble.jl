@@ -277,7 +277,8 @@ println("Sampler: $sampler_choice  |  acceptance ≈ ", round(acceptance_rate(ch
 
 ## Persist the chain for downstream plotting / reanalysis.
 save_ensemble_results(results_path;
-                 chain, k81, dar40, depth, setup, priors, sampler_choice)
+                 chain, k81, dar40, depth, setup, priors,
+                 sampler_choice, model_kind)
 
 ## Quick summary (full plotting lives in plot_basalmixing_ensemble.jl):
 ##
@@ -290,4 +291,11 @@ df = DataFrame(chain)
 df.logjoint = vec(chain[:logjoint])
 best_idx = argmax(df.logjoint)
 @info "MAP (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]]
-describe(chain)
+# Per-parameter quantile summary (FlexiChain doesn't implement StatsBase.describe in
+# Turing 0.45; fall back to a quick DataFrame summary).
+for p in [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
+    string(p) in names(df) || continue
+    v = df[!, p]
+    qs = quantile(v, [0.025, 0.5, 0.975])
+    @info "$(p): q025=$(round(qs[1]; sigdigits=4)) median=$(round(qs[2]; sigdigits=4)) q975=$(round(qs[3]; sigdigits=4)) std=$(round(std(v); sigdigits=4))"
+end

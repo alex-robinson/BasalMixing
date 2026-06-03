@@ -69,6 +69,7 @@ function plot_ensemble(;
     priors,
     setup::AbstractString="",
     sampler_choice::Symbol=:unknown,
+    model_kind::Symbol=:profile,
     outdir::AbstractString="plots",
     save_figures::Bool=true,
 )
@@ -89,7 +90,17 @@ function plot_ensemble(;
         F_ar40  = df.F_ar40[best_idx],
     )
     b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
+    # Profile run fills b.states (grey time slices) and b.k81/b.dar40 (right panel's
+    # dense time series). The predictions at t = sampled MAP time_pred are the same
+    # values, just on this dense grid — what changes between :profile and :sampled
+    # is only which time we annotate as "best".
     RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, sampling=false)
+    if model_kind === :sampled
+        t_pred_map = df.time_pred[best_idx]
+        b.k81.time_min   = t_pred_map
+        b.dar40.time_min = t_pred_map
+        b.joint.time_min = t_pred_map
+    end
     fig_best = plot_BasalMixingModelRun(b; k81_obs=k81, dar40_obs=dar40)
 
     ## log-posterior scatter ##
@@ -145,6 +156,7 @@ plot_ensemble(results::NamedTuple; kwargs...) =
         priors=results.priors,
         setup=get(results, :setup, ""),
         sampler_choice=get(results, :sampler_choice, :unknown),
+        model_kind=get(results, :model_kind, :profile),
         kwargs...,
     )
 
@@ -177,6 +189,7 @@ function plot_ensemble_from_workspace(; kwargs...)
         priors = Main.priors,
         setup  = isdefined(Main, :setup) ? Main.setup : "",
         sampler_choice = isdefined(Main, :sampler_choice) ? Main.sampler_choice : :unknown,
+        model_kind = isdefined(Main, :model_kind) ? Main.model_kind : :profile,
         kwargs...,
     )
 end
