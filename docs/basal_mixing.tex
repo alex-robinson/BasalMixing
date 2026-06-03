@@ -18,8 +18,10 @@
 
 \newcommand{\Kr}{\ensuremath{{}^{81}\mathrm{Kr}}}
 \newcommand{\Ar}{\ensuremath{\delta^{40}\mathrm{Ar}_{\mathrm{atm}}}}
-\newcommand{\tpred}{\ensuremath{t_{\mathrm{pred}}}}
+\newcommand{\tzero}{\ensuremath{t_{0}}}
+\newcommand{\tend}{\ensuremath{t_{\mathrm{end}}}}
 \newcommand{\teq}{\ensuremath{t_{\mathrm{eq}}}}
+\newcommand{\told}{\ensuremath{t_{\mathrm{old}}}}
 \newcommand{\code}[1]{\texttt{#1}}
 
 \begin{document}
@@ -29,15 +31,18 @@
 \begin{abstract}
 \noindent
 This document describes the 1-D basal mixing model used in the BasalMixing
-repository to interpret deep-ice \Kr{} and \Ar{} measurements at GISP2, and the
-three Markov-chain Monte Carlo (MCMC) strategies the code provides for
-inferring the mixing parameters. The three strategies (\code{:profile},
-\code{:sampled}, \code{:marginal}) differ in how they handle a single nuisance
-quantity: the time the mixing system has been running before the measurement.
-We argue that the marginal-likelihood strategy is the correct Bayesian
-treatment of this problem and is what should be used for publication-quality
-inference; the other two strategies are kept for backward compatibility and
-diagnostic comparison.
+repository to interpret deep-ice \Kr{} and \Ar{} measurements at GISP2, and
+the Markov-chain Monte Carlo (MCMC) strategy used to jointly infer the
+mixing parameters and the time \tzero{} of glacial inception at the GISP2
+site. The recommended strategy (\code{:sampled}) treats \tzero{} as a
+physical parameter of interest with a uniform prior on $[-3000, -700]$~kyr,
+where the bounds come from the geological window of first Greenland Ice
+Sheet (GrIS) glaciation ($\sim$2700~kyr ago) and the lower bound on basal
+ice age implied by \Kr{} measurements assuming no mixing
+($\sim$700~kyr).\footnote{Sign convention: \tzero{} is reported in signed
+kyr (negative $=$ past); $\tzero=0$ is the present day.} Two earlier
+strategies (\code{:profile} and \code{:marginal}) are retained for
+comparison and historical context; they are not the recommended treatment.
 \end{abstract}
 
 \tableofcontents
@@ -74,10 +79,14 @@ discretization:
         fraction.
 \end{itemize}
 
-The model integrates from $t=0$ (initial condition) up to some upper time
-$t_1$ (typically $3000\,\mathrm{kyr}$), advancing with a forward Euler step
-$dt=0.2\,\mathrm{kyr}$ (with an automatic retry at $dt/2$ if the integrator
-produces non-physical, negative concentrations).
+The model integrates the forward dynamics from glacial inception at \tzero{}
+up to the present day $\tend = 0$. The internal time variable used by the
+integrator is the positive elapsed time $\tau = t - \tzero \in [0,\,
+|\tzero|]$, advanced with a forward Euler step $d\tau=0.2\,\mathrm{kyr}$ (with
+an automatic retry at $d\tau/2$ if the integrator produces non-physical,
+negative concentrations). The dynamics are autonomous in $\tau$, so the only
+information the integrator needs about absolute time is the total duration
+$|\tzero|$.
 
 \subsection{Mixing rate profile}
 
@@ -102,37 +111,38 @@ $L_{\mathrm{ref}}=1$ and let $m_{\mathrm{clean}}$ carry the magnitude).
 
 The continuum dynamics of $c\in\{c_{81}, c_{40}\}$ are
 \begin{equation}
-\frac{\partial c}{\partial t} = \frac{\partial}{\partial z}\!\left(D(z)\,\frac{\partial c}{\partial z}\right) + S_c(z, t),
+\frac{\partial c}{\partial \tau} = \frac{\partial}{\partial z}\!\left(D(z)\,\frac{\partial c}{\partial z}\right) + S_c(z, \tau),
 \label{eq:pde}
 \end{equation}
-discretised cell-centre to cell-centre. The source/sink term $S_c$ differs by
-tracer:
+discretised cell-centre to cell-centre, with $\tau$ the positive elapsed time
+since inception. The source/sink term $S_c$ differs by tracer:
 
 \begin{itemize}
-  \item For \Kr{}, $S_{81}(z, t) = -\lambda\, c_{81}(z, t)$ with
+  \item For \Kr{}, $S_{81}(z, \tau) = -\lambda\, c_{81}(z, \tau)$ with
         $\lambda = \ln 2 / t_{1/2}$ and $t_{1/2}=229\,\mathrm{kyr}$, except in
-        the clean-ice cells for times $t > t_{\mathrm{old}}$, where the decay
-        term is switched off. (Physically: the clean ice was deposited at most
-        $t_{\mathrm{old}}$ ago and so its \Kr{} has decayed for at most that
-        long.)
+        the clean-ice cells for elapsed times $\tau > \told$, where the decay
+        term is switched off. Physically, $\told$ is the residence time of
+        the clean ice column above the mixing zone: ice older than $\told$
+        is assumed to have been flushed out by ice flow, so its \Kr{} clock
+        is capped at $\told$.
   \item For \Ar{}, $S_{40} = 0$ in the interior; at the bedrock cell only,
-        a flux $F_{40}$ is added: $S_{40}(z_{\mathrm{bed}}, t) =
+        a flux $F_{40}$ is added: $S_{40}(z_{\mathrm{bed}}, \tau) =
         F_{40}/\Delta z_{\mathrm{bed}}$.
 \end{itemize}
 
 The observable quantities derived from the state are
 \begin{align}
-\tau_{81}(z, t) &= -\,t_{1/2}\,\log_2\!\big(c_{81}(z, t)\big),
+\tau_{81}(z, \tau) &= -\,t_{1/2}\,\log_2\!\big(c_{81}(z, \tau)\big),
  \qquad \text{Kr-81 closed-system age, kyr,} \\
-\delta^{40}\mathrm{Ar}_{\mathrm{atm}}(z, t) &= 1000\,\left(\frac{c_{40}(z,t)}{A_{40}^{0}} - 1\right) - 0.066\,t,
+\delta^{40}\mathrm{Ar}_{\mathrm{atm}}(z, \tau) &= 1000\,\left(\frac{c_{40}(z,\tau)}{A_{40}^{0}} - 1\right) - 0.066\,\told,
  \qquad \text{$\delta^{40}\mathrm{Ar}$, \textperthousand},
 \end{align}
-where the $-0.066\,t$ term in the latter expression corrects for atmospheric
-\Ar{} growth over time (Bender et al. 2010).
+where the $-0.066\,\told$ term corrects for atmospheric \Ar{} drift over the
+residence time of the clean column (Bender et al.\ 2010).
 
 \subsection{Parameters}
 
-The five sampled parameters and the two fixed observation-noise scales are:
+The six sampled parameters and the two fixed observation-noise scales are:
 
 \begin{center}
 \small
@@ -143,8 +153,9 @@ Symbol & Meaning & Units & Prior & Code name \\
 $\delta$ & transition-zone thickness & m & $\mathrm{Uniform}(0.3,\,2.0)$ & \code{delta} \\
 $m_{\mathrm{clean}}$ & mixing rate in transition zone & m/kyr & $\mathrm{Normal}(0.03,\,0.002)$ trunc.\ $\geq 0$ & \code{m\_clean} \\
 $f_{\mathrm{dirty}}$ & dirty-to-clean mixing-rate ratio & --- & $\mathrm{Uniform}(4.0,\,6.5)$ & \code{f\_dirty} \\
-$t_{\mathrm{old}}$ & clean-ice maximum age & kyr & $\mathrm{Normal}(250,\,25)$ trunc.\ $\geq 0$ & \code{t\_old} \\
+$\told$ & clean-column residence time & kyr & $\mathrm{Normal}(250,\,25)$ trunc.\ $\geq 0$ & \code{t\_old} \\
 $F_{40}$ & bedrock \Ar{} source flux & cc/m$^2$/kyr & $\mathrm{Uniform}(0.004,\,0.007)$ & \code{F\_ar40} \\
+$\tzero$ & glacial inception time & kyr (signed) & $\mathrm{Uniform}(-3000,\,-700)$ & \code{t\_0} \\
 \midrule
 $\sigma_{81}$ & \Kr{} age obs.\ noise (\emph{fixed}) & kyr & 30 & \code{$\sigma$\_k81} \\
 $\sigma_{40}$ & $\delta^{40}\mathrm{Ar}$ obs.\ noise (\emph{fixed}) & \textperthousand & 0.03 & \code{$\sigma$\_dar40} \\
@@ -176,32 +187,57 @@ For depths between cell centres the model predictions are linearly
 interpolated. Both data sets are assumed to be independent Gaussian
 observations of the corresponding model quantities at the depths in question.
 
-\section{The likelihood and the time-of-comparison problem}
-\label{sec:tpred}
+\section{The likelihood and the inception-time problem}
+\label{sec:tzero}
 
-For given parameters $\theta = (\delta, m_{\mathrm{clean}}, f_{\mathrm{dirty}},
-t_{\mathrm{old}}, F_{40})$ and integration time $t$, the model produces
-predictions $\hat{\tau}_{81}(z_i;\theta,t)$ and $\widehat{\delta^{40}\mathrm{Ar}}(z_j;\theta,t)$
-at the observation depths $z_i,z_j$. Conditional on $\theta$ and $t$, the
-log-likelihood is the usual Gaussian:
+Given parameters $\theta = (\delta, m_{\mathrm{clean}}, f_{\mathrm{dirty}},
+\told, F_{40})$ and an inception time \tzero{}, the model integrates over
+the elapsed duration $|\tzero|$ to produce present-day predictions
+$\hat{\tau}_{81}(z_i;\theta,\tzero)$ and
+$\widehat{\delta^{40}\mathrm{Ar}}(z_j;\theta,\tzero)$ at the observation
+depths $z_i, z_j$. Conditional on $\theta$ and \tzero{}, the log-likelihood
+is the usual Gaussian:
 \begin{equation}
-\log L(t \mid \theta, \mathbf{y}) = -\tfrac{1}{2\sigma_{81}^2}\sum_{i}\!\left(\hat{\tau}_{81}(z_i;\theta,t) - y_i^{\,81}\right)^{2}
-- \tfrac{1}{2\sigma_{40}^2}\sum_{j}\!\left(\widehat{\delta^{40}\mathrm{Ar}}(z_j;\theta,t) - y_j^{\,40}\right)^{2} + C,
+\log L(\theta, \tzero \mid \mathbf{y}) = -\tfrac{1}{2\sigma_{81}^2}\sum_{i}\!\left(\hat{\tau}_{81}(z_i;\theta,\tzero) - y_i^{\,81}\right)^{2}
+- \tfrac{1}{2\sigma_{40}^2}\sum_{j}\!\left(\widehat{\delta^{40}\mathrm{Ar}}(z_j;\theta,\tzero) - y_j^{\,40}\right)^{2} + C,
 \label{eq:loglik}
 \end{equation}
-where $C$ collects $\theta$- and $t$-independent normalising constants.
+where $C$ collects $\theta$- and \tzero{}-independent normalising constants.
 
-The wrinkle is that we have no direct information about the integration time
-$t$ that should be used to compare the model with the measurements. Physically,
-$t$ is the amount of time the mixing process at the base of the ice sheet has
-been operating before the present day. The data alone don't pin this number
-down: once the mixing column has run long enough to reach a steady state, all
-later times look identical, so any $t \geq \teq(\theta)$ produces the same
-predictions and therefore the same likelihood.
+The inference problem is to recover the joint posterior on $(\theta,
+\tzero)$ given the GISP2 data \textbf{y}.
 
-This non-identifiability is the central reason the three sampling strategies
-below differ. They are all valid pieces of inference machinery but answer
-different questions.
+\paragraph{Physical bounds on \tzero{}.}
+Two independent lines of evidence bracket \tzero{}:
+\begin{itemize}
+  \item \emph{Upper bound ($\tzero \geq -3000$~kyr):} Greenland was
+        essentially ice-free before $\sim$2700~kyr ago. Inception of the
+        GrIS at the summit cannot have occurred earlier than the onset of
+        large-scale Northern-Hemisphere glaciation, which the geological
+        record places no earlier than the late Pliocene.
+  \item \emph{Lower bound ($\tzero \leq -700$~kyr):} the deepest \Kr{}
+        sample carries a closed-system age of $\sim$714~kyr. Treated as a
+        no-mixing model (i.e.\ as the in-situ \Kr{} clock without any
+        rejuvenation from below), that age is a lower bound on how long the
+        basal ice has been sitting at the summit. Any mixing only \emph{adds}
+        atmospheric-fresh \Kr{} from above, so the true ice age must be at
+        least that old.
+\end{itemize}
+These two bounds motivate the prior $\tzero \sim \mathrm{Uniform}(-3000,
+-700)$~kyr used in the recommended (\code{:sampled}) inference.
+
+\paragraph{Data-constraint structure.}
+The data weakly constrain \tzero{} from \emph{within} its prior window. The
+basal mixing system reaches an effective equilibrium on timescales
+$\teq(\theta)\sim 1\,000$~kyr or less, after which the present-day
+predictions are nearly independent of how much longer the system has been
+running. Two inception times $|\tzero^{(1)}|, |\tzero^{(2)}| > \teq(\theta)$
+produce essentially identical predictions and identical likelihoods. This
+saturation is the central feature of the inference and explains why the
+posterior on \tzero{} is wide: the data alone cannot tell us that the GrIS
+incepted at $-2300$ vs.\ $-1500$~kyr if both durations comfortably exceed
+the equilibration time. What \emph{can} be ruled out is inception times
+shorter than $\teq$, where the system has not yet relaxed.
 
 \section{Sampling strategies}
 \label{sec:strategies}
@@ -213,167 +249,163 @@ ensemble sampler (\code{Emcee}; Goodman \& Weare 2010) with 32 walkers, so
 their wall-clock costs are directly comparable per integration of the forward
 model.
 
-\subsection{\code{:profile} --- profile likelihood}
+The recommended strategy is \code{:sampled}. The other two
+(\code{:profile} and \code{:marginal}) predate the present framing and are
+retained for diagnostic comparison; their limitations are discussed below.
+
+\subsection{\code{:sampled} --- joint $(\theta, \tzero)$ posterior \emph{(recommended)}}
 
 \paragraph{What it does.}
-For every parameter proposal $\theta$, integrate the forward model from $t=0$
-to $t_1=3000\,\mathrm{kyr}$ on a 1-kyr grid. At each grid point compute the
-log-likelihood (\ref{eq:loglik}). Select
-\begin{equation}
-\tpred^{\star}(\theta) = \arg\max_{t}\log L(t \mid \theta, \mathbf{y}),
-\end{equation}
-and use $\log L^{\star}(\theta) = \log L(\tpred^{\star} \mid \theta, \mathbf{y})$
-as the contribution to the MCMC log-posterior.
+Treat \tzero{} as one of the model's physical parameters, with the prior
+$\tzero \sim \mathrm{Uniform}(-3000, -700)$~kyr motivated in
+Section~\ref{sec:tzero}. For each $(\theta, \tzero)$ proposal, run the
+forward model once over elapsed duration $|\tzero|$ and evaluate
+(\ref{eq:loglik}) at the present-day endpoint.
 
 \paragraph{Assumptions.}
 \begin{itemize}
-  \item The ``correct'' time $\tpred$ for each $\theta$ is treated as a
-        deterministic function of $\theta$ chosen to make the data fit best.
-  \item No prior is placed on $\tpred$.
+  \item \tzero{} is a meaningful physical quantity --- the time of glacial
+        inception at the GISP2 site --- about which we have prior
+        information from independent geological and isotopic constraints.
+  \item The comparison time is the present day; the integration finishes
+        exactly there.
+\end{itemize}
+
+\paragraph{What you get out.}
+A proper joint Bayesian posterior on $(\theta, \tzero)$. The marginal on
+$\theta$ accounts for uncertainty in \tzero{} by averaging; the marginal on
+\tzero{} is the full inference about inception time given the data
+\emph{and} the physical bounds.
+
+\paragraph{Pros and cons.}
+This is the appropriate Bayesian treatment given that we have meaningful
+prior information about \tzero{} and care about its posterior. The
+6-dimensional chain mixes well under \code{Emcee} (acceptance $\approx$
+0.24 in test runs at 32 walkers, 500 iterations), with wall-clock per
+sample governed by the mean of $|\tzero|$ across the prior.
+
+The posterior on \tzero{} is honestly wide because the data have weak
+post-equilibration power, but the width is now physically interpretable:
+it represents how much the data narrow the prior window, not an artefact
+of an arbitrary upper integration bound (see the discussion of
+\code{:sampled-with-elapsed-time-prior} below for the previous, deprecated
+framing).
+
+\subsection{\code{:profile} --- profile likelihood \emph{(diagnostic only)}}
+
+\paragraph{What it does.}
+For every parameter proposal $\theta$, integrate the forward model from
+elapsed time $\tau=0$ to a fixed upper bound $\tau_1=3000\,\mathrm{kyr}$ on
+a 1-kyr grid. At each grid point compute the log-likelihood as if that
+$\tau$ were the duration $|\tzero|$. Select the elapsed time that maximises
+the likelihood:
+\begin{equation}
+\tau^{\star}(\theta) = \arg\max_{\tau}\log L(\theta, \tau \mid \mathbf{y}),
+\end{equation}
+and use $\log L^{\star}(\theta) = \log L(\theta, \tau^{\star} \mid \mathbf{y})$
+as the contribution to the MCMC log-posterior. The chain reports
+$\tzero := -\tau^{\star}(\theta)$ as a derived (non-sampled) quantity for
+naming consistency with \code{:sampled}.
+
+\paragraph{Assumptions.}
+\begin{itemize}
+  \item No prior on \tzero{}.
+  \item The ``correct'' \tzero{} for each $\theta$ is treated as a
+        deterministic function of $\theta$, chosen to make the data fit best.
 \end{itemize}
 
 \paragraph{What you get out.}
 A posterior on $\theta$ from a non-standard (non-Bayesian) likelihood: the
-\emph{profile likelihood} $L^{\star}(\theta)$. The reported $\tpred^{\star}$
-per chain sample is the maximizer, not a sample from a posterior.
+\emph{profile likelihood} $L^{\star}(\theta)$. The reported $\tzero$ per
+chain sample is a point optimum, not a sample from a posterior.
 
 \paragraph{Pros and cons.}
-Computationally efficient because the inner integration can early-terminate
-once predicted ages exceed the range of interest. Single-pass per sample,
-no extra dimension to mix over. \textit{However:} the posterior on $\theta$
-is biased --- it over-credits each $\theta$ for the best $t$ available rather
-than averaging the data's support over plausible $t$. The reported $\tpred$
-``posterior'' is meaningless as a probability distribution; it's a histogram
-of point optima.
+Computationally efficient (the inner integration can early-terminate once
+predicted ages exceed the range of interest). \textit{However:} the
+posterior on $\theta$ is biased --- it over-credits each $\theta$ for the
+best $\tzero$ available rather than averaging the data's support over
+plausible \tzero{}. The reported $\tzero$ ``posterior'' is a histogram of
+point optima with no probability-distribution interpretation. The prior
+information on \tzero{} ($-3000 \leq \tzero \leq -700$~kyr) is not used.
 
-\subsection{\code{:sampled} --- explicit \tpred{} prior, joint $(\theta, \tpred)$ posterior}
+\subsection{\code{:marginal} --- elapsed time as a nuisance parameter \emph{(deprecated)}}
+\label{sec:marginal}
 
-\paragraph{What it does.}
-Treat $\tpred$ as an additional sampled parameter, with a uniform prior
-$\tpred \sim \mathrm{Uniform}(700, 3000)\,\mathrm{kyr}$. For each $(\theta,
-\tpred)$ proposal, run the forward model once from $t=0$ to $t=\tpred$ and
-evaluate (\ref{eq:loglik}) at $t = \tpred$.
-
-\paragraph{Assumptions.}
-\begin{itemize}
-  \item $\tpred$ is a meaningful physical quantity that we have prior belief
-        about (uniform on $[700, 3000]$).
-  \item The integration finish time \emph{is} the comparison time.
-\end{itemize}
-
-\paragraph{What you get out.}
-A proper joint Bayesian posterior on $(\theta, \tpred)$. The marginal on
-$\theta$ accounts for uncertainty in $\tpred$ by averaging; the marginal on
-$\tpred$ is the data's combined credibility about ``how long has this been
-running.''
-
-\paragraph{Pros and cons.}
-Bayesianly sound at the level of the joint posterior, and on average
-\textit{cheaper} per evaluation than \code{:profile} because most proposed
-$\tpred$ are less than 3000 (typical mean $\tpred\approx 1500\,\mathrm{kyr}$,
-so a $\sim 2\times$ speed-up).
-
-\textbf{But the posterior on $\tpred$ is essentially unidentifiable.} Once
-the system has equilibrated for the proposed $\theta$, every later $t$ gives
-the same likelihood; the data don't choose between $\tpred=1500$ and
-$\tpred=2500$ when $\teq(\theta)=1000$. The marginal $p(\tpred \mid
-\mathbf{y})$ in the chain therefore:
-\begin{itemize}
-  \item Has a tall peak near the smallest equilibration time that is
-        compatible with the data (typically $\sim$1000 kyr), where the
-        likelihood first plateaus;
-  \item Rises monotonically toward the upper prior bound $t_1=3000\,\mathrm{kyr}$.
-        This rise is the mixture-of-uniforms effect: chain samples with
-        smaller $\teq(\theta)$ contribute mass to all $t$ above their
-        $\teq$, so the higher $t$ values accumulate contributions from
-        more chain samples. It is a mathematically correct posterior under
-        a $\mathrm{Uniform}(700, 3000)$ prior, but the precise rise rate
-        and the location of the upper edge are determined by the
-        \emph{arbitrary} choice of $t_1$, not by the data.
-\end{itemize}
-If one extended the prior to $\mathrm{Uniform}(700, T_{\max})$ for some
-$T_{\max} > 3000$, the same rising shape would extend to $T_{\max}$ and pile
-up there. The boundary is artificial.
-
-\subsection{\code{:marginal} --- treat \tpred{} as a nuisance parameter, integrate it out}
-
-\paragraph{What it does.}
-Recognise that $\tpred$ is not a quantity we actually care about (it has no
-independent physical observation) and is unidentifiable past
-$\teq(\theta)$. Treat it as a nuisance parameter and marginalise it out of
-the likelihood:
+\paragraph{Historical context.}
+The \code{:marginal} strategy was developed under an earlier framing in
+which the integration duration was treated as a nuisance parameter with no
+independent physical interpretation. In that framing, the goal was to
+infer $\theta$ alone, marginalising the duration out of the likelihood:
 \begin{equation}
-\log p(\mathbf{y} \mid \theta) \;=\; \log\!\int_{t_0}^{t_1}\!\! L(t \mid \theta, \mathbf{y})\,p(t)\,dt.
+\log p(\mathbf{y} \mid \theta) \;=\; \log\!\int_{0}^{\tau_1}\!\! L(\theta, \tau \mid \mathbf{y})\,p(\tau)\,d\tau,
 \label{eq:marginal-loglik}
 \end{equation}
-With a uniform prior $p(t) = 1/(t_1 - t_0)$ on $[t_0, t_1]$, the normalisation
-is constant in $\theta$ and can be absorbed into the chain's normalising
-constant. Numerically we evaluate (\ref{eq:marginal-loglik}) as a trapezoidal
-sum on the 1-kyr prediction grid:
+with a uniform prior $p(\tau) = 1/\tau_1$ on $[0, \tau_1]$. Numerically the
+integral is evaluated as a trapezoidal sum on the 1-kyr prediction grid:
 \begin{equation}
-\log p(\mathbf{y} \mid \theta) \;\approx\; \log\!\left(\sum_{k}\exp\!\big(\log L(t_k \mid \theta)\big)\,\Delta t\right),
+\log p(\mathbf{y} \mid \theta) \;\approx\; \log\!\left(\sum_{k}\exp\!\big(\log L(\theta, \tau_k)\big)\,\Delta \tau\right),
 \label{eq:marginal-trapz}
 \end{equation}
-computed via the standard \code{logsumexp} trick to avoid underflow.
-
-\paragraph{Equilibration speed-up.}
-For typical $\theta$ the integration spends most of its wall-clock in the
-post-equilibration phase, where the integrand is constant. We detect
-equilibration online by comparing the predicted observation vectors $W$
-slices apart (default $W=100\,\mathrm{kyr}$) and declaring equilibrium when
-both \Kr{} and \Ar{} predictions have moved less than tight tolerances
-($\sim 1\%$ of the corresponding observation noise scale). When equilibrium
-is declared at slice $k_{\mathrm{eq}}$ with time $\teq$ and log-likelihood
-$\log L_{\mathrm{eq}}$, the remainder of the integral is added in closed
-form:
+computed via the standard \code{logsumexp} trick to avoid underflow. An
+online equilibration check (compare predicted observation vectors $W=100$
+slices apart; declare equilibrium when both \Kr{} and \Ar{} predictions
+have moved less than $\sim 1\%$ of the corresponding observation noise)
+allows the integrator to skip the post-equilibration tail:
 \begin{equation}
-\log p(\mathbf{y} \mid \theta) \;\approx\; \log\!\left(\sum_{k \leq k_{\mathrm{eq}}}\!\exp\!\big(\log L(t_k)\big)\,\Delta t \;+\; (t_1 - \teq)\,\exp\!\big(\log L_{\mathrm{eq}}\big)\right).
+\log p(\mathbf{y} \mid \theta) \;\approx\; \log\!\left(\sum_{k \leq k_{\mathrm{eq}}}\!\exp\!\big(\log L(\theta, \tau_k)\big)\,\Delta \tau \;+\; (\tau_1 - \tau_{\mathrm{eq}})\,\exp\!\big(\log L_{\mathrm{eq}}\big)\right).
 \label{eq:marginal-eq}
 \end{equation}
-In practice the integrator equilibrates around $t \in [1\,000, 1\,500]$ kyr,
-giving roughly a 2--3$\times$ speed-up per evaluation.
 
-\paragraph{Assumptions.}
+\paragraph{Why it is no longer recommended.}
+The marginal-likelihood framing required \tzero{} to be a nuisance
+parameter with no independent prior information --- a stance that we no
+longer hold. With the physical bounds derived in Section~\ref{sec:tzero},
+\tzero{} carries a meaningful prior of width $2300$~kyr, and its posterior
+is a quantity we care about (it tells us when the GrIS incepted at the
+summit). Two specific failure modes of \code{:marginal} under the present
+framing:
+
 \begin{itemize}
-  \item $\tpred$ is a nuisance parameter --- we are not interested in
-        sampling its distribution.
-  \item The prior on $\tpred$ is uniform over $[t_0, t_1]$. The choice of
-        $t_1$ enters the log-likelihood only as an additive constant
-        (the normalisation $-\log(t_1-t_0)$), which factors out of the
-        chain's relative weights; \emph{the posterior on $\theta$ does not
-        depend on $t_1$}, provided $t_1$ is large enough to be past
-        equilibration for the bulk of the posterior support. This is the
-        key qualitative improvement over \code{:sampled}.
-  \item Equilibration is detected within tolerance $\sim 1\%$ of
-        $\sigma_{81}$ and $\sigma_{40}$; if for some $\theta$ the system
-        equilibrates more slowly than the integration grid runs, the
-        explicit sum (\ref{eq:marginal-trapz}) is used and remains correct.
+  \item \emph{The prior on \tzero{} is discarded.} Equation
+        (\ref{eq:marginal-loglik}) integrates against a uniform prior on
+        the elapsed-time variable $[0, \tau_1=3000]$~kyr, which is not the
+        same as the physical prior $\tzero \sim
+        \mathrm{Uniform}(-3000, -700)$. Inception times shorter than
+        700~kyr (excluded by the \Kr{} no-mixing argument) are still given
+        weight in the integrand.
+  \item \emph{The posterior on \tzero{} is no longer in the chain.} A
+        post-hoc reconstruction $p(\tzero \mid \mathbf{y}) \propto
+        N^{-1}\sum_s L(\theta^{(s)}, \tzero) / Z(\theta^{(s)})$ averages
+        per-slice likelihood curves over the marginalised-$\theta$ chain.
+        It is a valid summary of what the data say about \tzero{} under
+        the uniform-on-elapsed-time prior, but it does not correctly
+        incorporate the physical prior either, and it requires re-running
+        the forward model at every chain draw to recover.
 \end{itemize}
 
-\paragraph{What you get out.}
-A clean marginal posterior on $\theta$ (5-dimensional, vs.\ 6-dimensional
-for \code{:sampled}). \textbf{There is no posterior on $\tpred$ in the chain.}
-If a posterior on $\tpred$ is needed for diagnostics, it can be reconstructed
-\textit{post hoc} from the chain:
-\begin{equation}
-p(\tpred \mid \mathbf{y}) \;\propto\; \int p(\tpred \mid \mathbf{y},\theta)\,p(\theta \mid \mathbf{y})\,d\theta
-                          \;\approx\; \frac{1}{N}\sum_{s=1}^{N}\frac{L(\tpred \mid \theta^{(s)})}{\int L(t \mid \theta^{(s)})\,dt}\!,
-\end{equation}
-which averages the per-slice likelihood curves computed during sampling. The
-result is meaningful (it summarises what the data say about $\tpred$ in light
-of the parameter posterior) without injecting the boundary-pile-up artefact
-of \code{:sampled}.
+\paragraph{When to still use it.}
+For sensitivity checks: comparing the \code{:sampled} posterior on $\theta$
+against the \code{:marginal} posterior under a deliberately permissive
+prior tells you how much the physical prior is doing. They should agree
+broadly on the well-identified parameters ($m_{\mathrm{clean}}$, \told{}); a
+large disagreement on $f_{\mathrm{dirty}}$, $\delta$, or $F_{40}$ would
+flag a posterior strongly shaped by the \tzero{} prior, which is worth
+knowing.
 
-\paragraph{Pros and cons.}
-This is the correct Bayesian treatment of an unconstrained nuisance
-parameter and is the recommended default. Wall-clock per evaluation is
-comparable to \code{:profile} (the integrator runs to $\teq$ rather than to
-$t_1$); the chain is one dimension smaller than \code{:sampled} so Emcee
-converges with slightly fewer iterations for the same effective sample size.
+\subsection{Comparison summary}
 
-The main caveat is that the answer is qualitatively different from
-\code{:profile} or \code{:sampled} --- the marginal posterior on $\theta$
-will generally be broader because we no longer over-credit a fitted $t$.
+\begin{center}
+\small
+\begin{tabular}{lcccc}
+\toprule
+& \tzero{} treatment & prior on \tzero{} & posterior on \tzero{} & status \\
+\midrule
+\code{:sampled}  & sampled parameter & Uniform$(-3000,-700)$ & in chain & recommended \\
+\code{:profile}  & point optimum     & none                  & histogram of optima & diagnostic \\
+\code{:marginal} & integrated out    & Uniform$(0, 3000)$ on $\tau$ & post-hoc reconstruction & deprecated \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{Practical considerations}
 
@@ -392,12 +424,12 @@ threads in newer versions.
 
 \subsection{Numerical robustness}
 
-The forward Euler integrator at $\Delta t=0.2\,\mathrm{kyr}$ is marginally
+The forward Euler integrator at $\Delta \tau=0.2\,\mathrm{kyr}$ is marginally
 stable; for some proposals the explicit step overshoots and produces
 non-positive concentrations, raising \code{DomainError} in
 \code{concentration\_to\_age}. The forward function catches these and reports
-failure; the \code{@model} retries once at $\Delta t/2$ before giving up and
-attaching a vanishingly small likelihood.
+failure; the \code{@model} retries once at $\Delta \tau/2$ before giving up
+and attaching a vanishingly small likelihood.
 
 \subsection{Outputs and reproducibility}
 
@@ -406,7 +438,10 @@ Each ensemble run writes a snapshot to
 DataFrames, the depth grid, the priors, the sampler and the model kind. The
 plotting helpers (\code{plot\_basalmixing\_ensemble.jl}) load this snapshot
 and re-derive figures, switching the MAP best-fit re-run on the recorded
-\code{model\_kind}.
+\code{model\_kind}. For \code{:sampled} chains the best-fit re-run
+integrates exactly from \tzero{} to \tend{} (no extrapolation past the
+inference endpoint); for \code{:profile} and \code{:marginal} it runs the
+full $0 \to \tau_1$ dense grid and annotates the argmin slice.
 
 \section*{References}
 
