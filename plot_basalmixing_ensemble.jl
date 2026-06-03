@@ -194,6 +194,130 @@ function plot_ensemble_from_workspace(; kwargs...)
     )
 end
 
+"""
+    derived_time_distribution(results::NamedTuple;
+                              n_samples::Int=500,
+                              t1::Float64=3000.0, dt::Float64=0.2)
+
+Reconstruct the posterior on `time_pred` from a chain that doesn't sample it
+(`model_kind = :marginal`). Implements
+
+  p(t | data) ≈ (1/N) Σ_s L(t | θ_s) / Z(θ_s),  with Z(θ_s) = ∫ L(t | θ_s) dt,
+
+by re-running the forward model at each of `n_samples` chain draws (stride-
+thinned across all walkers and iterations), reading the per-slice log-
+likelihood from `b.k81.rmse` and `b.dar40.rmse`, normalising each curve to be
+a probability density, and averaging.
+
+For chains that *do* sample `time_pred` directly (`:profile`, `:sampled`), the
+time-pred column itself is the empirical posterior — no re-running needed —
+and this function falls back to that.
+
+Returns a NamedTuple `(t_grid, p_t, map_t)` where `t_grid` is the kyr grid
+points, `p_t` is the density at each grid point (1/kyr), and `map_t` is the
+maximum-a-posteriori time.
+"""
+function derived_time_distribution(results::NamedTuple;
+                                   n_samples::Int=500,
+                                   t1::Float64=3000.0,
+                                   dt::Float64=0.2)
+    chain    = results.chain
+    k81      = results.k81
+    dar40    = results.dar40
+    depth    = results.depth
+    model_kind = get(results, :model_kind, :profile)
+
+    df = DataFrame(chain)
+    n_total = nrow(df)
+
+    # Fast paths for chains that already carry time_pred.
+    if model_kind in (:profile, :sampled) && "time_pred" in names(df)
+        t_grid_full = collect(0.0:1.0:t1)
+        # Empirical density via histogram on the same 1-kyr grid the marginal uses.
+        h_counts = zeros(Float64, length(t_grid_full))
+        for v in df.time_pred
+            k = clamp(round(Int, v) + 1, 1, length(t_grid_full))
+            h_counts[k] += 1.0
+        end
+        p_t = h_counts ./ (sum(h_counts) * 1.0)  # 1/kyr (Δt = 1 kyr)
+        map_t = t_grid_full[argmax(p_t)]
+        return (t_grid=t_grid_full, p_t=p_t, map_t=map_t)
+    end
+
+    # :marginal — average normalised L(t|θ_s) curves over chain draws.
+    idx = unique(round.(Int, range(1, n_total; length=min(n_samples, n_total))))
+    bs  = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
+           for _ in 1:Threads.maxthreadid()]
+
+    n_pred       = length(bs[1].k81.time)
+    t_grid       = collect(bs[1].k81.time)
+    densities    = zeros(n_pred, length(idx))
+    n_obs_k81    = nrow(k81)
+    n_obs_dar40  = nrow(dar40)
+
+    Threads.@threads for j in eachindex(idx)
+        b = bs[Threads.threadid()]
+        i = idx[j]
+        p = (delta   = df.delta[i],
+             m_clean = df.m_clean[i],
+             f_dirty = df.f_dirty[i],
+             t_old   = df.t_old[i],
+             F_ar40  = df.F_ar40[i])
+        ok = RunBasalMixingModel!(p, b, (k81, dar40); t1=t1, dt=dt, sampling=false)
+        if !ok
+            densities[:, j] .= 0.0
+            continue
+        end
+        # Per-slice log-likelihood from RMSE
+        log_L = Vector{Float64}(undef, n_pred)
+        @inbounds for k in 1:n_pred
+            log_L[k] = -0.5 * (n_obs_k81*b.k81.rmse[k]^2 + n_obs_dar40*b.dar40.rmse[k]^2)
+        end
+        log_Z = logsumexp(log_L)
+        if isfinite(log_Z)
+            @. densities[:, j] = exp(log_L - log_Z)  # per-slice mass; Δt=1 kyr -> density in 1/kyr
+        end
+    end
+
+    p_t   = vec(mean(densities; dims=2))
+    map_t = t_grid[argmax(p_t)]
+    return (t_grid=t_grid, p_t=p_t, map_t=map_t)
+end
+
+"""
+    plot_derived_time(results; outdir="plots", save_figures=true, kwargs...)
+
+Plot the derived (or sampled) `time_pred` posterior. Returns a NamedTuple
+`(fig, t_grid, p_t, map_t)`.
+"""
+function plot_derived_time(results::NamedTuple;
+                           outdir::AbstractString="plots",
+                           save_figures::Bool=true,
+                           kwargs...)
+    d = derived_time_distribution(results; kwargs...)
+    setup       = get(results, :setup, "")
+    model_kind  = get(results, :model_kind, :profile)
+    label_kind  = model_kind === :marginal ? "derived" : "sampled"
+
+    fig = Figure(size=(720, 420))
+    ax  = Axis(fig[1, 1];
+               xlabel = "time_pred (kyr)",
+               ylabel = "density (1/kyr)",
+               title  = "$(label_kind) posterior on time_pred  (model_kind=:$model_kind)")
+    lines!(ax, d.t_grid, d.p_t; linewidth=2, color=:steelblue)
+    vlines!(ax, [d.map_t]; color=:red, linewidth=2,
+            label="MAP = $(round(Int, d.map_t)) kyr")
+    axislegend(ax; position=:rt)
+
+    if save_figures
+        mkpath(outdir)
+        prefix = joinpath(outdir, string(Dates.today())*"_")
+        suffix = isempty(setup) ? "" : "_$setup"
+        mysave(prefix*"derived-time-pred$suffix.png", fig)
+    end
+    return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, map_t=d.map_t)
+end
+
 # Allow `julia plot_basalmixing_ensemble.jl path/to/chain.jld2`
 if abspath(PROGRAM_FILE) == @__FILE__
     path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain.jld2"
