@@ -261,7 +261,7 @@ bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=d
 #              computes log ∫ L(t | θ) dt with equilibration-tail shortcut.
 #              `t_0` is a nuisance variable, integrated out — not sampled.
 #              5-D MCMC (vs 6-D for :sampled). See docs/basal_mixing.tex.
-model_kind = :marginal
+model_kind = :sampled
 
 if model_kind === :profile
     model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
