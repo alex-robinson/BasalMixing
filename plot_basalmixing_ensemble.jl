@@ -76,9 +76,9 @@ function plot_ensemble(;
     df = DataFrame(chain)
     df.logjoint = vec(chain[:logjoint])
 
-    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
+    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
     labels = ["delta (m)", "m_clean (m/yr)", "f_dirty",
-              "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "time_pred (kyr)"]
+              "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "t_0 (kyr BP, negative = past)"]
     best_idx = argmax(df.logjoint)
 
     ## Best-fit depth profiles ##
@@ -91,15 +91,17 @@ function plot_ensemble(;
     )
     b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
     # Profile run fills b.states (grey time slices) and b.k81/b.dar40 (right panel's
-    # dense time series). The predictions at t = sampled MAP time_pred are the same
+    # dense time series). The predictions at t = sampled MAP t_0 are the same
     # values, just on this dense grid — what changes between :profile and :sampled
     # is only which time we annotate as "best".
     RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, sampling=false)
     if model_kind === :sampled
-        t_pred_map = df.time_pred[best_idx]
-        b.k81.time_min   = t_pred_map
-        b.dar40.time_min = t_pred_map
-        b.joint.time_min = t_pred_map
+        # Chain stores t_0 in signed kyr BP; b.*.time_min holds positive
+        # elapsed time, so flip the sign before annotating the trajectory.
+        t_elapsed_map = -df.t_0[best_idx]
+        b.k81.time_min   = t_elapsed_map
+        b.dar40.time_min = t_elapsed_map
+        b.joint.time_min = t_elapsed_map
     end
     fig_best = plot_BasalMixingModelRun(b; k81_obs=k81, dar40_obs=dar40)
 
@@ -199,23 +201,25 @@ end
                               n_samples::Int=500,
                               t1::Float64=3000.0, dt::Float64=0.2)
 
-Reconstruct the posterior on `time_pred` from a chain that doesn't sample it
-(`model_kind = :marginal`). Implements
+Reconstruct the posterior on `t_0` (signed kyr BP, negative = past) from a
+chain that doesn't sample it (`model_kind = :marginal`). Implements
 
   p(t | data) ≈ (1/N) Σ_s L(t | θ_s) / Z(θ_s),  with Z(θ_s) = ∫ L(t | θ_s) dt,
 
 by re-running the forward model at each of `n_samples` chain draws (stride-
 thinned across all walkers and iterations), reading the per-slice log-
 likelihood from `b.k81.rmse` and `b.dar40.rmse`, normalising each curve to be
-a probability density, and averaging.
+a probability density, and averaging. The forward model integrates in positive
+elapsed time internally; the returned `t_grid` is sign-flipped to signed kyr
+BP so the output is consistent with `:profile` / `:sampled` chains.
 
-For chains that *do* sample `time_pred` directly (`:profile`, `:sampled`), the
-time-pred column itself is the empirical posterior — no re-running needed —
-and this function falls back to that.
+For chains that *do* sample `t_0` directly (`:profile`, `:sampled`), the t_0
+column itself is the empirical posterior — no re-running needed — and this
+function falls back to that.
 
-Returns a NamedTuple `(t_grid, p_t, map_t)` where `t_grid` is the kyr grid
-points, `p_t` is the density at each grid point (1/kyr), and `map_t` is the
-maximum-a-posteriori time.
+Returns a NamedTuple `(t_grid, p_t, map_t)` where `t_grid` is the signed kyr
+BP grid (negative values, ordered increasing), `p_t` is the density at each
+grid point (1/kyr), and `map_t` is the maximum-a-posteriori `t_0`.
 """
 function derived_time_distribution(results::NamedTuple;
                                    n_samples::Int=500,
@@ -230,13 +234,13 @@ function derived_time_distribution(results::NamedTuple;
     df = DataFrame(chain)
     n_total = nrow(df)
 
-    # Fast paths for chains that already carry time_pred.
-    if model_kind in (:profile, :sampled) && "time_pred" in names(df)
-        t_grid_full = collect(0.0:1.0:t1)
-        # Empirical density via histogram on the same 1-kyr grid the marginal uses.
+    # Fast paths for chains that already carry t_0.
+    if model_kind in (:profile, :sampled) && "t_0" in names(df)
+        # Histogram in signed kyr BP on the same 1-kyr grid the marginal uses.
+        t_grid_full = collect(-t1:1.0:0.0)
         h_counts = zeros(Float64, length(t_grid_full))
-        for v in df.time_pred
-            k = clamp(round(Int, v) + 1, 1, length(t_grid_full))
+        for v in df.t_0
+            k = clamp(round(Int, v - t_grid_full[1]) + 1, 1, length(t_grid_full))
             h_counts[k] += 1.0
         end
         p_t = h_counts ./ (sum(h_counts) * 1.0)  # 1/kyr (Δt = 1 kyr)
@@ -279,15 +283,18 @@ function derived_time_distribution(results::NamedTuple;
         end
     end
 
-    p_t   = vec(mean(densities; dims=2))
-    map_t = t_grid[argmax(p_t)]
-    return (t_grid=t_grid, p_t=p_t, map_t=map_t)
+    p_t_elapsed = vec(mean(densities; dims=2))
+    # Convert positive-elapsed grid to signed kyr BP, monotonically increasing.
+    t_grid_bp   = reverse(-t_grid)
+    p_t         = reverse(p_t_elapsed)
+    map_t       = t_grid_bp[argmax(p_t)]
+    return (t_grid=t_grid_bp, p_t=p_t, map_t=map_t)
 end
 
 """
     plot_derived_time(results; outdir="plots", save_figures=true, kwargs...)
 
-Plot the derived (or sampled) `time_pred` posterior. Returns a NamedTuple
+Plot the derived (or sampled) `t_0` posterior. Returns a NamedTuple
 `(fig, t_grid, p_t, map_t)`.
 """
 function plot_derived_time(results::NamedTuple;
@@ -301,9 +308,9 @@ function plot_derived_time(results::NamedTuple;
 
     fig = Figure(size=(720, 420))
     ax  = Axis(fig[1, 1];
-               xlabel = "time_pred (kyr)",
+               xlabel = "t_0 (kyr BP, negative = past)",
                ylabel = "density (1/kyr)",
-               title  = "$(label_kind) posterior on time_pred  (model_kind=:$model_kind)")
+               title  = "$(label_kind) posterior on t_0  (model_kind=:$model_kind)")
     lines!(ax, d.t_grid, d.p_t; linewidth=2, color=:steelblue)
     vlines!(ax, [d.map_t]; color=:red, linewidth=2,
             label="MAP = $(round(Int, d.map_t)) kyr")
