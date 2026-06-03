@@ -526,6 +526,192 @@ function RunBasalMixingModelToTime!(p, b, t_target, dat; t0::Float64=0.0, dt::Fl
     return true
 end
 
+"""
+    logsumexp(x)
+
+Numerically stable log(sum(exp.(x))) for an `AbstractVector` `x`. Returns
+`-Inf` if every entry is `-Inf`.
+"""
+function logsumexp(x)
+    m = maximum(x)
+    isfinite(m) || return m
+    s = zero(float(eltype(x)))
+    @inbounds @simd for v in x
+        s += exp(v - m)
+    end
+    return m + log(s)
+end
+
+"""
+    RunBasalMixingModelMarginal!(p, b, dat; t0=0.0, t1=3000.0, dt=0.2,
+                                 eq_window=100, eq_atol_k81=0.3, eq_atol_dar40=3e-4)
+
+Marginal-time variant: integrates the forward model 0 → `t1` while recording
+the joint per-kyr-slice log-likelihood. Returns the *log marginal likelihood*
+`log ∫ L(t | θ, data) dt`, with `time_pred` integrated out as a nuisance
+parameter under a Uniform(`t0`, `t1`) prior.
+
+Equilibration detection (the speed-up): every prediction slice (1 kyr), the
+function compares the current predicted observation vector to the one
+`eq_window` slices back. If both k81-age and δ⁴⁰Ar predictions have moved by
+less than (`eq_atol_k81`, `eq_atol_dar40`), the system is declared
+equilibrated and the remaining `(t1 - t)` of the integral is added
+analytically as `(t1 - t) * exp(log_L_eq)` rather than by continuing to step
+the ODE.
+
+`eq_atol_k81 = 0.3` kyr is ~σ_k81 / 100; `eq_atol_dar40 = 3e-4` ‰ is
+~σ_dar40 / 100. The thresholds are deliberately conservative — pushing them
+larger gets more speed-up but risks declaring equilibrium when there's still
+a few-kyr-per-decade drift, which would bias the marginal.
+
+Returns the log marginal likelihood (Float64). On a `DomainError` during the
+integration, returns `-Inf`. Other exceptions propagate.
+
+Side-effects: populates `b.k81.dat[:, 1:k_last]` and `b.dar40.dat[:, 1:k_last]`
+with predictions over the integrated range. `b.k81.kmin`, `b.k81.time_min`,
+etc. are set to the argmax-likelihood slice so existing plotting still works
+(roughly equivalent to picking the best time slice).
+"""
+function RunBasalMixingModelMarginal!(p, b, dat;
+                                      t0::Float64=0.0,
+                                      t1::Float64=3000.0,
+                                      dt::Float64=0.2,
+                                      eq_window::Int=100,
+                                      eq_atol_k81::Float64=0.3,
+                                      eq_atol_dar40::Float64=3e-4)
+
+    (delta, m_clean, f_dirty, t_old, F_ar40) = p
+    L_ref = 1.0
+    k81_decay_constant = decay_constant(229.0)
+
+    (k81_obs_df, dar40_obs_df) = dat
+    @assert b.k81.depth == k81_obs_df.depth
+    @assert b.dar40.depth == dar40_obs_df.depth
+
+    k81_obs   = k81_obs_df.age
+    k81_sigma = k81_obs_df.age_sigma[1]
+    k81_var   = k81_sigma^2
+    dar40_obs   = dar40_obs_df.dar40
+    dar40_sigma = dar40_obs_df.dar40_sigma[1]
+    dar40_var   = dar40_sigma^2
+    n_obs_k81   = length(k81_obs)
+    n_obs_dar40 = length(dar40_obs)
+
+    mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
+
+    ## Initial values ##
+    ResetBasalMixingModel!(b)
+    b.state.c_k81 .= 1.0
+    Ar40_00 = calc_ar40_with_aging(0.0, 0.0)
+    b.state.c_ar40 .= Ar40_00
+    @. b.state.dar40 = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
+
+    time = t0:dt:t1
+    n_pred = length(b.k81.time)              # total prediction slices in the grid
+    k_eq   = 0                               # 0 → not equilibrated; >0 → slice at which we stopped
+    t_eq   = NaN
+    log_L_eq = -Inf
+
+    try
+        for t in time
+            # k81 decay + mixing
+            @inline decay_tendency!(b.dRdt_decay, b.state.c_k81, dt; λ = k81_decay_constant)
+            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_k81, b.mixing_rate, b.thickness;
+                                     Lref=L_ref, idx_clean=b.idx_clean)
+            if t > t_old
+                for j in b.idx_clean; b.dRdt_decay[j] = 0.0; end
+            end
+            @. b.state.c_k81  = b.state.c_k81 + b.dRdt_decay * dt + b.dRdt_mixing * dt
+            @. b.state.age_k81 = concentration_to_age(b.state.c_k81, 1.0)
+
+            # Ar40 mixing
+            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_ar40, b.mixing_rate, b.thickness;
+                                     Lref=L_ref, idx_clean=b.idx_clean)
+            b.dRdt_mixing[end] += F_ar40 / b.thickness[end]
+            @. b.state.c_ar40  = b.state.c_ar40 + b.dRdt_mixing * dt
+            @. b.state.dar40   = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
+            b.state.time .= t
+
+            # Record predicted obs + per-slice RMSE when we hit a prediction time
+            if b.dar40.k <= n_pred && t == b.dar40.time[b.dar40.k]
+                k = b.dar40.k
+                store!(b.dar40, k, b.depth, b.state.dar40)
+                sse = 0.0
+                for i in 1:n_obs_dar40
+                    sse += (b.dar40.dat[i,k] - dar40_obs[i])^2 / dar40_var
+                end
+                b.dar40.rmse[k] = sqrt(sse / n_obs_dar40)
+                b.dar40.k += 1
+            end
+            if b.k81.k <= n_pred && t == b.k81.time[b.k81.k]
+                k = b.k81.k
+                store!(b.k81, k, b.depth, b.state.age_k81)
+                sse = 0.0
+                for i in 1:n_obs_k81
+                    sse += (b.k81.dat[i,k] - k81_obs[i])^2 / k81_var
+                end
+                b.k81.rmse[k] = sqrt(sse / n_obs_k81)
+                b.k81.k += 1
+
+                # Equilibration check: comparing this slice to one eq_window slices back.
+                if k > eq_window
+                    Δk81   = 0.0
+                    Δdar40 = 0.0
+                    for i in 1:n_obs_k81
+                        Δk81   = max(Δk81,   abs(b.k81.dat[i,k]   - b.k81.dat[i,k-eq_window]))
+                    end
+                    for i in 1:n_obs_dar40
+                        Δdar40 = max(Δdar40, abs(b.dar40.dat[i,k] - b.dar40.dat[i,k-eq_window]))
+                    end
+                    if Δk81 < eq_atol_k81 && Δdar40 < eq_atol_dar40
+                        k_eq    = k
+                        t_eq    = b.k81.time[k]
+                        log_L_eq = -0.5 * (n_obs_k81*b.k81.rmse[k]^2 + n_obs_dar40*b.dar40.rmse[k]^2)
+                        break
+                    end
+                end
+            end
+        end
+    catch e
+        e isa DomainError || rethrow(e)
+        return -Inf
+    end
+
+    # Compute the log marginal likelihood.
+    # Δt_pred = 1 kyr (the spacing of b.k81.time). It's a constant w.r.t. θ so could be
+    # dropped, but including it keeps the result on a meaningful absolute scale.
+    Δt_pred = b.k81.time[2] - b.k81.time[1]
+    n_explicit = (k_eq == 0) ? (b.k81.k - 1) : k_eq
+    log_L_per_slice = Vector{Float64}(undef, n_explicit)
+    @inbounds for k in 1:n_explicit
+        log_L_per_slice[k] = -0.5 * (n_obs_k81*b.k81.rmse[k]^2 + n_obs_dar40*b.dar40.rmse[k]^2)
+    end
+
+    if k_eq == 0
+        # No equilibrium detected: integral is just the sum over the time grid.
+        log_Z = logsumexp(log_L_per_slice) + log(Δt_pred)
+    else
+        # Trapezoidal sum over the explicit transient + analytic plateau tail.
+        tail_log_weight = log(t1 - t_eq) + log_L_eq
+        log_Z = logsumexp([logsumexp(log_L_per_slice) + log(Δt_pred), tail_log_weight])
+    end
+
+    # Side-effect: pick the highest-likelihood slice so the plot's "best" annotation
+    # has something sensible to point at. argmax over an empty vector is undefined,
+    # so guard.
+    if n_explicit > 0
+        kbest = argmax(log_L_per_slice)
+        b.k81.kmin     = kbest
+        b.dar40.kmin   = kbest
+        b.joint.kmin   = kbest
+        b.k81.time_min   = b.k81.time[kbest]
+        b.dar40.time_min = b.dar40.time[kbest]
+        b.joint.time_min = b.joint.time[kbest]
+    end
+
+    return log_Z
+end
+
 function mixing_rate_discrete!(m, depth, depth_lim, m_clean, m_dirty, delta)
     n = length(m)
     m .= 0.0

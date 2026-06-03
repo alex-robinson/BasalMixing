@@ -185,6 +185,47 @@ actual marginal, not a deterministic side-effect of point estimation.
     return
 end
 
+"""
+    basal_mixing_marginal(k81_age_obs, dar40_obs, bs, dat, dt, priors)
+
+Marginal-time companion. `time_pred` is *not* sampled; instead the forward
+model is integrated 0 → 3000 kyr and the likelihood is
+`log ∫ L(t | θ, data) dt`, treating `time_pred` as a nuisance parameter under
+a Uniform(t0, t1) prior. This is what we want when the data doesn't
+constrain `time_pred` past the equilibration time — see
+`docs/basal_mixing.tex` for the derivation.
+
+The `k81_age_obs` and `dar40_obs` arguments are kept for signature symmetry
+with the other two models; they're not used directly here because the
+log-likelihood is computed inside `RunBasalMixingModelMarginal!` against the
+obs DataFrames in `dat`.
+"""
+@model function basal_mixing_marginal(k81_age_obs, dar40_obs, bs, dat, dt, priors)
+
+    delta   = priors.delta   isa Distribution ? delta   ~ priors.delta   : priors.delta
+    m_clean = priors.m_clean isa Distribution ? m_clean ~ priors.m_clean : priors.m_clean
+    f_dirty = priors.f_dirty isa Distribution ? f_dirty ~ priors.f_dirty : priors.f_dirty
+    t_old   = priors.t_old   isa Distribution ? t_old   ~ priors.t_old   : priors.t_old
+    F_ar40  = priors.F_ar40  isa Distribution ? F_ar40  ~ priors.F_ar40  : priors.F_ar40
+
+    b = bs[Threads.threadid()]
+
+    p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old, F_ar40=F_ar40)
+    log_Z = RunBasalMixingModelMarginal!(p, b, dat; dt=dt)
+
+    if !isfinite(log_Z)
+        # DomainError fallback: retry once at half dt.
+        log_Z = RunBasalMixingModelMarginal!(p, b, dat; dt=dt*0.5)
+    end
+
+    # Add the marginal log-likelihood directly. No likelihood ~ statement is needed
+    # because the observations have already been integrated against the predictions
+    # inside RunBasalMixingModelMarginal!.
+    Turing.@addlogprob! log_Z
+
+    return
+end
+
 ## SCRIPT ##
 
 depth, setup = generate_depths("highdirty";step=0.25)
@@ -198,17 +239,23 @@ bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=d
       for _ in 1:Threads.maxthreadid()]
 
 ## Model selection ##
-# :profile -> RunBasalMixingModel! integrates 0 -> t1=3000 kyr and the model
-#             reports the argmin-RMSE slice. time_pred is a derived quantity.
-# :sampled -> RunBasalMixingModelToTime! integrates 0 -> sampled time_pred
-#             once; time_pred is a proper sampled parameter with the
-#             priors.time_pred prior.
-model_kind = :sampled
+# :profile  -> RunBasalMixingModel! integrates 0 -> t1=3000 kyr and the model
+#              reports the argmin-RMSE slice. time_pred is a derived quantity.
+# :sampled  -> RunBasalMixingModelToTime! integrates 0 -> sampled time_pred
+#              once; time_pred is a proper sampled parameter with the
+#              priors.time_pred prior.
+# :marginal -> RunBasalMixingModelMarginal! integrates 0 -> 3000 kyr and
+#              computes log ∫ L(t | θ) dt with equilibration-tail shortcut.
+#              time_pred is a nuisance variable, integrated out — not sampled.
+#              5-D MCMC (vs 6-D for :sampled). See docs/basal_mixing.tex.
+model_kind = :marginal
 
 if model_kind === :profile
     model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
 elseif model_kind === :sampled
     model = basal_mixing_sampled(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
+elseif model_kind === :marginal
+    model = basal_mixing_marginal(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
 else
     error("Unknown model_kind: $model_kind")
 end
@@ -290,11 +337,12 @@ save_ensemble_results(results_path;
 df = DataFrame(chain)
 df.logjoint = vec(chain[:logjoint])
 best_idx = argmax(df.logjoint)
-@info "MAP (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]]
+# time_pred only exists in :profile / :sampled chains; skip it for :marginal.
+map_cols = filter(c -> string(c) in names(df), [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred])
+@info "MAP (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, map_cols]
 # Per-parameter quantile summary (FlexiChain doesn't implement StatsBase.describe in
 # Turing 0.45; fall back to a quick DataFrame summary).
-for p in [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :time_pred]
-    string(p) in names(df) || continue
+for p in map_cols
     v = df[!, p]
     qs = quantile(v, [0.025, 0.5, 0.975])
     @info "$(p): q025=$(round(qs[1]; sigdigits=4)) median=$(round(qs[2]; sigdigits=4)) q975=$(round(qs[3]; sigdigits=4)) std=$(round(std(v); sigdigits=4))"
