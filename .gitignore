@@ -1,3 +1,11 @@
 .DS_Store
 *Manifest.toml
 plots
+logs
+
+# LaTeX build artefacts (the .pdf and .tex are tracked; everything else is regenerable)
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc
+docs/*.synctex.gz
