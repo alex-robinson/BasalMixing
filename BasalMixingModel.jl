@@ -442,6 +442,90 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     return true                 # true = integration succeeded
 end
 
+"""
+    RunBasalMixingModelToTime!(p, b, t_target, dat; t0=0.0, dt=0.2)
+
+Sampled-time variant of `RunBasalMixingModel!`. Integrates the forward model
+from `t0` up to `t_target` (a sampled parameter, not a grid) and stores the
+final-state predictions at the observation depths in slot 1 of `b.k81.dat`
+and `b.dar40.dat`. No RMSE / argmin scan — the only "time of comparison"
+is `t_target`.
+
+Returns `true` on success, `false` on a `DomainError` (concentration went
+non-positive, etc.); other exceptions propagate as in `RunBasalMixingModel!`.
+
+`b.joint.time_min`, `b.k81.time_min`, `b.dar40.time_min`, and the `kmin`
+fields are set to `t_target` / `1` respectively so the existing plotting code
+(which reads `b.joint.kmin` etc.) still works.
+"""
+function RunBasalMixingModelToTime!(p, b, t_target, dat; t0::Float64=0.0, dt::Float64=0.2)
+
+    (delta, m_clean, f_dirty, t_old, F_ar40) = p
+    L_ref = 1.0
+    k81_decay_constant = decay_constant(229.0)
+
+    (k81_obs_df, dar40_obs_df) = dat
+    @assert b.k81.depth == k81_obs_df.depth
+    @assert b.dar40.depth == dar40_obs_df.depth
+
+    # Set the mixing rate from the parameters
+    mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
+
+    ## Initial values ##
+    ResetBasalMixingModel!(b)
+    b.state.c_k81 .= 1.0
+    Ar40_00 = calc_ar40_with_aging(0.0, 0.0)
+    b.state.c_ar40 .= Ar40_00
+    @. b.state.dar40 = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
+
+    # Integrate t0 -> t_target. The grid may not land exactly on t_target; the
+    # discretization error is at most dt and is absorbed in the likelihood's σ.
+    time = t0:dt:t_target
+
+    try
+        for t in time
+            # k81 decay
+            @inline decay_tendency!(b.dRdt_decay, b.state.c_k81, dt; λ = k81_decay_constant)
+            # k81 mixing
+            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_k81, b.mixing_rate, b.thickness;
+                                     Lref=L_ref, idx_clean=b.idx_clean)
+            # No aging in clean ice past t_old
+            if t > t_old
+                for j in b.idx_clean; b.dRdt_decay[j] = 0.0; end
+            end
+            @. b.state.c_k81 = b.state.c_k81 + b.dRdt_decay * dt + b.dRdt_mixing * dt
+            @. b.state.age_k81 = concentration_to_age(b.state.c_k81, 1.0)
+
+            # Ar40 mixing (reuses b.dRdt_mixing buffer)
+            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_ar40, b.mixing_rate, b.thickness;
+                                     Lref=L_ref, idx_clean=b.idx_clean)
+            b.dRdt_mixing[end] += F_ar40 / b.thickness[end]
+            @. b.state.c_ar40 = b.state.c_ar40 + b.dRdt_mixing * dt
+            @. b.state.dar40  = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
+
+            b.state.time .= t
+        end
+    catch e
+        e isa DomainError || rethrow(e)
+        return false
+    end
+
+    # Drop the final-state predictions into slot 1 of b.k81 / b.dar40.
+    store!(b.k81,   1, b.depth, b.state.age_k81)
+    store!(b.dar40, 1, b.depth, b.state.dar40)
+
+    # Make the existing plot code (which reads b.joint.kmin, b.joint.time_min,
+    # b.k81.dat[:, b.joint.kmin], ...) still produce the right slice.
+    b.k81.kmin     = 1
+    b.dar40.kmin   = 1
+    b.joint.kmin   = 1
+    b.k81.time_min   = float(t_target)
+    b.dar40.time_min = float(t_target)
+    b.joint.time_min = float(t_target)
+
+    return true
+end
+
 function mixing_rate_discrete!(m, depth, depth_lim, m_clean, m_dirty, delta)
     n = length(m)
     m .= 0.0

@@ -104,7 +104,7 @@ priors = (
     # Run the model
     p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old, F_ar40=F_ar40)
     success = RunBasalMixingModel!(p, b, dat; dt=dt, sampling=true)
-    
+
     if !success
         # Try one more time with a smaller timestep
         success = RunBasalMixingModel!(p, b, dat; dt=dt*0.5, sampling=true)
@@ -123,12 +123,64 @@ priors = (
         dar40_pred := fill(1e8, length(dar40_obs))
     end
 
-    # Likelihoods: 
+    # Likelihoods:
     #   - observed k81 ages ~ Normal(predicted, σ_k81)
     #   - observed dar40 values ~ Normal(predicted, σ_dar40)
 
     k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
     dar40_obs ~ MvNormal(dar40_pred, σ_dar40 * I)
+
+    return
+end
+
+"""
+    basal_mixing_sampled(k81_age_obs, dar40_obs, bs, dat, dt, priors)
+
+Sampled-time companion to `basal_mixing`: instead of running the forward model
+to `t1=3000` and selecting `argmin(rmse)` (a profile likelihood), this model
+draws `time_pred` from `priors.time_pred` and integrates the forward model
+exactly once, from 0 to that sampled time. The likelihood compares the
+observations to the predictions at `time_pred`.
+
+This is the proper Bayesian setup — the posterior on `time_pred` is now an
+actual marginal, not a deterministic side-effect of point estimation.
+"""
+@model function basal_mixing_sampled(k81_age_obs, dar40_obs, bs, dat, dt, priors)
+
+    ## Set priors ##
+    delta     = priors.delta     isa Distribution ? delta     ~ priors.delta     : priors.delta
+    m_clean   = priors.m_clean   isa Distribution ? m_clean   ~ priors.m_clean   : priors.m_clean
+    f_dirty   = priors.f_dirty   isa Distribution ? f_dirty   ~ priors.f_dirty   : priors.f_dirty
+    t_old     = priors.t_old     isa Distribution ? t_old     ~ priors.t_old     : priors.t_old
+    F_ar40    = priors.F_ar40    isa Distribution ? F_ar40    ~ priors.F_ar40    : priors.F_ar40
+    σ_k81     = priors.σ_k81     isa Distribution ? σ_k81     ~ priors.σ_k81     : priors.σ_k81
+    σ_dar40   = priors.σ_dar40   isa Distribution ? σ_dar40   ~ priors.σ_dar40   : priors.σ_dar40
+    time_pred = priors.time_pred isa Distribution ? time_pred ~ priors.time_pred : priors.time_pred
+
+    # Pick this thread's private model state
+    b = bs[Threads.threadid()]
+
+    # Run the forward model exactly once, 0 -> time_pred
+    p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty, t_old=t_old, F_ar40=F_ar40)
+    success = RunBasalMixingModelToTime!(p, b, time_pred, dat; dt=dt)
+
+    if !success
+        # Retry with a smaller dt before giving up
+        success = RunBasalMixingModelToTime!(p, b, time_pred, dat; dt=dt*0.5)
+    end
+
+    if success
+        # Final-state predictions live in slot 1 (set by RunBasalMixingModelToTime!)
+        k81_age_pred := b.k81.dat[:, 1]
+        dar40_pred   := b.dar40.dat[:, 1]
+    else
+        # Force a very low likelihood by returning predictions far from any plausible obs
+        k81_age_pred := fill(1e8, length(k81_age_obs))
+        dar40_pred   := fill(1e8, length(dar40_obs))
+    end
+
+    k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
+    dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
 
     return
 end
@@ -145,7 +197,21 @@ depth, setup = generate_depths("highdirty";step=0.25)
 bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
       for _ in 1:Threads.maxthreadid()]
 
-model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
+## Model selection ##
+# :profile -> RunBasalMixingModel! integrates 0 -> t1=3000 kyr and the model
+#             reports the argmin-RMSE slice. time_pred is a derived quantity.
+# :sampled -> RunBasalMixingModelToTime! integrates 0 -> sampled time_pred
+#             once; time_pred is a proper sampled parameter with the
+#             priors.time_pred prior.
+model_kind = :sampled
+
+if model_kind === :profile
+    model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
+elseif model_kind === :sampled
+    model = basal_mixing_sampled(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors)
+else
+    error("Unknown model_kind: $model_kind")
+end
 
 ## Sampler selection ##
 # :emcee       -> Affine-invariant ensemble sampler (Goodman & Weare). Robust to
@@ -169,7 +235,8 @@ n_samples = 10_000   # used for the MH variants; per-chain count
 n_chains  = 4
 
 # Where to persist the sampled chain (set to nothing to skip saving).
-results_path = "results/emcee-chain.jld2"
+# Default name reflects model_kind so :sampled doesn't overwrite the :profile snapshot.
+results_path = "results/emcee-chain-$(model_kind).jld2"
 
 # Optional per-parameter linked-space variance overrides for :mh_tuned
 # (target ~25-40% acceptance). Leave NamedTuple() to use var_linked for all.
