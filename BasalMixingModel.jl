@@ -945,14 +945,18 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     end
 
     ## PANEL 2 or 3: Closed-system age versus time
-    x_hi = ceil(t_max_val / 500) * 500   # round up to nearest 500 kyr for clean tick spacing
-    x_hi = max(x_hi, 500.0)
-    ax2 = Axis(fig[1,end+1], limits=((0,x_hi),(0,900)), xlabel="Time (kyr)", ylabel="⁸¹K closed system age (kyr)" )
-    ax2.xticks = collect(0:1000:x_hi)
+    # Display in signed kyr (negative = past, 0 = present day). The integrator
+    # runs in positive elapsed time τ ∈ [0, t_max_val]; the curve shown here is
+    # x(τ) = τ - t_max_val, so the trajectory starts at t_0 = -t_max_val and
+    # ends at t_end = 0. The x-axis is fixed at [-3000, 0] regardless of mode
+    # so a :sampled run with |t_0| < 3000 leaves visible empty space to the
+    # left of the curve — exactly the part the model never integrated.
+    ax2 = Axis(fig[1,end+1], limits=((-3000,0),(0,900)), xlabel="Time (kyr)", ylabel="⁸¹K closed system age (kyr)" )
+    ax2.xticks = -3000:1000:0
     ax2.yticks = 0:100:900
 
     for (j,d) in enumerate(k81.depth)
-        lines!(ax2,k81.time[1:k_last_pred],k81.dat[j,1:k_last_pred],color=col_k81[j],linewidth=2)
+        lines!(ax2,k81.time[1:k_last_pred] .- t_max_val,k81.dat[j,1:k_last_pred],color=col_k81[j],linewidth=2)
     end
 
     # Plot closed-system age from data
