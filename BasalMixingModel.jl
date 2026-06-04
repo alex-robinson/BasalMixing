@@ -147,7 +147,7 @@ end
 function BasalMixingModelPredictions(depth::Vector{Float64}, time::Vector{Float64}; depth_ref=nothing)
     nd, nt = length(depth), length(time)
     dat = zeros(nd,nt)
-    rmse = fill(1e8,nt)
+    rmse = fill(Inf, nt)
     if isnothing(depth_ref)
         interp_idx = zeros(nd)
     else
@@ -155,7 +155,7 @@ function BasalMixingModelPredictions(depth::Vector{Float64}, time::Vector{Float6
         interp_idx = [findlast(depth_ref .<= d) for d in depth]
     end
     kmin = 1
-    rmse_min = 1e8
+    rmse_min = Inf
     time_min = 0.0
     k = 1
     return BasalMixingModelPredictions(depth,time,dat,rmse,interp_idx, kmin, rmse_min, time_min, k, nd, nt)
@@ -165,10 +165,10 @@ function BasalMixingModelPredictions(time::Vector{Float64})
     depth = [0.0]
     nd, nt = 1, length(time)
     dat = zeros(nt)
-    rmse = fill(1e8,nt)
+    rmse = fill(Inf, nt)
     interp_idx = [0]
     kmin = 1
-    rmse_min = 1e8
+    rmse_min = Inf
     time_min = 0.0
     k = 1
     return BasalMixingModelPredictions(depth,time,dat,rmse,interp_idx, kmin, rmse_min, time_min, k, nd, nt)
@@ -176,9 +176,13 @@ end
 
 function reset!(pred::BasalMixingModelPredictions)
     pred.dat .= 0.0
-    pred.rmse .= 0.0
+    # Use Inf (not 0) as the "not yet computed" sentinel so argmin(pred.rmse)
+    # later never picks a slot that the integration didn't actually fill —
+    # important when t1 stops short of the prediction grid (e.g. the :sampled
+    # path which only integrates 0 → |t_0|). Matches the constructor.
+    pred.rmse .= Inf
     pred.kmin = 1
-    pred.rmse_min = 1e8
+    pred.rmse_min = Inf
     pred.time_min = 0.0
     pred.k = 1
     return
