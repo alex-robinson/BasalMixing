@@ -30,8 +30,8 @@ begin
 
     b = BasalMixingModel(depth=depth,k81_obs_depths=k81_obs.depth,dar40_obs_depths=dar40_obs.depth)
     
-    RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1, sampling=false)
-    @btime RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1, sampling=true)
+    RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1)
+    @btime RunBasalMixingModel!(p, b, (k81_obs, dar40_obs); dt=0.1)
 
     # Plot the results
     fig = plot_BasalMixingModelRun(b; k81_obs=k81_obs, dar40_obs=dar40_obs)

@@ -283,7 +283,21 @@ function ResetBasalMixingModel!(b)
     return
 end
 
-function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
+"""
+    RunBasalMixingModel!(p, b, dat; t0=0.0, t1=3000.0, dt=1.0)
+
+Trajectory-tracing forward run used by the plotting code. Integrates the model
+on `t0:dt:t1` and records the full trajectory into `b.states`, `b.k81.dat`,
+and `b.dar40.dat`. Also computes per-slice RMSE against the observations
+(handy as a diagnostic).
+
+Used only for visualisation — inference goes through
+`RunBasalMixingModelToTime!`, which evaluates a single endpoint.
+
+Returns `true` on success, `false` on a `DomainError` (concentration went
+non-positive, etc.); other exceptions propagate.
+"""
+function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0)
 
     # Extract model parameters
     (delta, m_clean, f_dirty, t_old, F_ar40) = p
@@ -297,7 +311,7 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     # Check consistency with our BasalMixingModel info
     @assert b.k81.depth == k81_obs_df.depth
     @assert b.dar40.depth == dar40_obs_df.depth
-    
+
     k81_obs   = k81_obs_df.age
     k81_sigma = k81_obs_df.age_sigma[1]
     k81_var   = k81_sigma^2
@@ -322,108 +336,67 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
 
     Ar40_00 = calc_ar40_with_aging(0.0, 0.0)    # Modern concentration [cc/m³]
     b.state.c_ar40 .= Ar40_00                         # store uniform modern value initially
-    
+
     @. b.state.dar40 = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
 
-    # Loop over time and advance model
     try
         for t in time
 
-            # Get decay tendency
             @inline decay_tendency!(b.dRdt_decay, b.state.c_k81, dt; λ = k81_decay_constant)
-
-            # Get mixing tendency
             @inline mixing_tendency!(b.dRdt_mixing, b.state.c_k81, b.mixing_rate, b.thickness; Lref=L_ref, idx_clean=b.idx_clean)
 
-            # Avoid aging in clean ice beyond t_old time too
             if t > t_old
                 for j in b.idx_clean; b.dRdt_decay[j] = 0.0; end
             end
 
-            # Update concentration and ages
             @. b.state.c_k81 = b.state.c_k81 + b.dRdt_decay * dt + b.dRdt_mixing * dt
-
-            # Get ages too
             @. b.state.age_k81 = concentration_to_age(b.state.c_k81,1.0)
-            
-            ## AR40 ##
-            
-            # Ar40 mixing tendency, overwrites b.dRdt_mixing with Ar40 values
+
             @inline mixing_tendency!(b.dRdt_mixing, b.state.c_ar40, b.mixing_rate, b.thickness; Lref=L_ref, idx_clean=b.idx_clean)
-
-            # Bottom source flux into the deepest box only
             b.dRdt_mixing[end] += F_ar40 / b.thickness[end]
-
-            # Advance Ar40
             @. b.state.c_ar40 = b.state.c_ar40 + b.dRdt_mixing * dt
-
-            # Update delta Ar40
             @. b.state.dar40 = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
 
-            ##########
-
-            # Update to current time
             b.state.time .= t
 
-            ## Update summary objects
-
-            if !sampling && t == b.states.time[b.states.k]
-                # Store time slice of current variables
+            if t == b.states.time[b.states.k]
                 k = b.states.k
                 b.states.age_k81[:,k] = b.state.age_k81
                 b.states.c_k81[:,k] = b.state.c_k81
                 b.states.c_ar40[:,k] = b.state.c_ar40
                 b.states.dar40[:,k] = b.state.dar40
-                b.states.k += 1 # Advance to next time index
+                b.states.k += 1
             end
-
-            # Ar40 ##
 
             if t == b.dar40.time[b.dar40.k]
                 k = b.dar40.k
-
                 store!(b.dar40,k,b.depth,b.state.dar40)
-                
-                # Get sum of squared errors over all observations for current time
                 sse = 0.0
                 for i in 1:n_obs_dar40
                     sse += (b.dar40.dat[i,k] - dar40_obs[i])^2 / dar40_var
                 end
                 b.dar40.rmse[k] = sqrt(sse/n_obs_dar40)
-
                 b.dar40.k += 1
             end
 
-            # K81 ##
-            
             if t == b.k81.time[b.k81.k]
                 k = b.k81.k
-
                 store!(b.k81,k,b.depth,b.state.age_k81)
-                
-                # Get sum of squared errors over all observations for current time
                 sse = 0.0
                 for i in 1:n_obs_k81
                     sse += (b.k81.dat[i,k] - k81_obs[i])^2 / k81_var
                 end
                 b.k81.rmse[k] = sqrt(sse/n_obs_k81)
-                
-                # Stop time loop early if sampling and relevant ages are too high already
-                if sampling && minimum(@view b.k81.dat[:,k]) >= 1000
-                    break
-                end
-
                 b.k81.k += 1
             end
 
         end
-    
+
     catch e
-        e isa DomainError || rethrow(e)  # only swallow DomainErrors, let everything else propagate
-        return false            # false = integration failed
+        e isa DomainError || rethrow(e)
+        return false
     end
 
-    # Calculate summary metrics
     b.k81.kmin = kmin = argmin(b.k81.rmse)
     b.k81.rmse_min = b.k81.rmse[kmin]
     b.k81.time_min = b.k81.time[kmin]
@@ -437,13 +410,7 @@ function RunBasalMixingModel!(p, b, dat; t0=0.0,t1=3000.0,dt=1.0,sampling=false)
     b.joint.rmse_min = b.joint.rmse[kmin]
     b.joint.time_min = b.joint.time[kmin]
 
-    if !sampling
-        kmin = b.joint.kmin
-        rmse_min, rmses, time_min, ages = round(b.joint.rmse_min,digits=3), round.([b.k81.rmse_min, b.dar40.rmse_min],digits=3), b.joint.time_min, round.(b.k81.dat[:,kmin])
-        println("k81&dAr40 (rmse_min, rmses, time_min, ages): $rmse_min, $rmses, $time_min, $ages")
-    end
-
-    return true                 # true = integration succeeded
+    return true
 end
 
 """
@@ -528,192 +495,6 @@ function RunBasalMixingModelToTime!(p, b, t_target, dat; t0::Float64=0.0, dt::Fl
     b.joint.time_min = float(t_target)
 
     return true
-end
-
-"""
-    logsumexp(x)
-
-Numerically stable log(sum(exp.(x))) for an `AbstractVector` `x`. Returns
-`-Inf` if every entry is `-Inf`.
-"""
-function logsumexp(x)
-    m = maximum(x)
-    isfinite(m) || return m
-    s = zero(float(eltype(x)))
-    @inbounds @simd for v in x
-        s += exp(v - m)
-    end
-    return m + log(s)
-end
-
-"""
-    RunBasalMixingModelMarginal!(p, b, dat; t0=0.0, t1=3000.0, dt=0.2,
-                                 eq_window=100, eq_atol_k81=0.3, eq_atol_dar40=3e-4)
-
-Marginal-time variant: integrates the forward model 0 → `t1` while recording
-the joint per-kyr-slice log-likelihood. Returns the *log marginal likelihood*
-`log ∫ L(t | θ, data) dt`, with `time_pred` integrated out as a nuisance
-parameter under a Uniform(`t0`, `t1`) prior.
-
-Equilibration detection (the speed-up): every prediction slice (1 kyr), the
-function compares the current predicted observation vector to the one
-`eq_window` slices back. If both k81-age and δ⁴⁰Ar predictions have moved by
-less than (`eq_atol_k81`, `eq_atol_dar40`), the system is declared
-equilibrated and the remaining `(t1 - t)` of the integral is added
-analytically as `(t1 - t) * exp(log_L_eq)` rather than by continuing to step
-the ODE.
-
-`eq_atol_k81 = 0.3` kyr is ~σ_k81 / 100; `eq_atol_dar40 = 3e-4` ‰ is
-~σ_dar40 / 100. The thresholds are deliberately conservative — pushing them
-larger gets more speed-up but risks declaring equilibrium when there's still
-a few-kyr-per-decade drift, which would bias the marginal.
-
-Returns the log marginal likelihood (Float64). On a `DomainError` during the
-integration, returns `-Inf`. Other exceptions propagate.
-
-Side-effects: populates `b.k81.dat[:, 1:k_last]` and `b.dar40.dat[:, 1:k_last]`
-with predictions over the integrated range. `b.k81.kmin`, `b.k81.time_min`,
-etc. are set to the argmax-likelihood slice so existing plotting still works
-(roughly equivalent to picking the best time slice).
-"""
-function RunBasalMixingModelMarginal!(p, b, dat;
-                                      t0::Float64=0.0,
-                                      t1::Float64=3000.0,
-                                      dt::Float64=0.2,
-                                      eq_window::Int=100,
-                                      eq_atol_k81::Float64=0.3,
-                                      eq_atol_dar40::Float64=3e-4)
-
-    (delta, m_clean, f_dirty, t_old, F_ar40) = p
-    L_ref = 1.0
-    k81_decay_constant = decay_constant(229.0)
-
-    (k81_obs_df, dar40_obs_df) = dat
-    @assert b.k81.depth == k81_obs_df.depth
-    @assert b.dar40.depth == dar40_obs_df.depth
-
-    k81_obs   = k81_obs_df.age
-    k81_sigma = k81_obs_df.age_sigma[1]
-    k81_var   = k81_sigma^2
-    dar40_obs   = dar40_obs_df.dar40
-    dar40_sigma = dar40_obs_df.dar40_sigma[1]
-    dar40_var   = dar40_sigma^2
-    n_obs_k81   = length(k81_obs)
-    n_obs_dar40 = length(dar40_obs)
-
-    mixing_rate_smooth!(b.mixing_rate, b.depth, b.depth_lim, m_clean, m_clean * f_dirty, delta)
-
-    ## Initial values ##
-    ResetBasalMixingModel!(b)
-    b.state.c_k81 .= 1.0
-    Ar40_00 = calc_ar40_with_aging(0.0, 0.0)
-    b.state.c_ar40 .= Ar40_00
-    @. b.state.dar40 = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
-
-    time = t0:dt:t1
-    n_pred = length(b.k81.time)              # total prediction slices in the grid
-    k_eq   = 0                               # 0 → not equilibrated; >0 → slice at which we stopped
-    t_eq   = NaN
-    log_L_eq = -Inf
-
-    try
-        for t in time
-            # k81 decay + mixing
-            @inline decay_tendency!(b.dRdt_decay, b.state.c_k81, dt; λ = k81_decay_constant)
-            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_k81, b.mixing_rate, b.thickness;
-                                     Lref=L_ref, idx_clean=b.idx_clean)
-            if t > t_old
-                for j in b.idx_clean; b.dRdt_decay[j] = 0.0; end
-            end
-            @. b.state.c_k81  = b.state.c_k81 + b.dRdt_decay * dt + b.dRdt_mixing * dt
-            @. b.state.age_k81 = concentration_to_age(b.state.c_k81, 1.0)
-
-            # Ar40 mixing
-            @inline mixing_tendency!(b.dRdt_mixing, b.state.c_ar40, b.mixing_rate, b.thickness;
-                                     Lref=L_ref, idx_clean=b.idx_clean)
-            b.dRdt_mixing[end] += F_ar40 / b.thickness[end]
-            @. b.state.c_ar40  = b.state.c_ar40 + b.dRdt_mixing * dt
-            @. b.state.dar40   = calc_delta_ar40(b.state.c_ar40, Ar40_00, t_old)
-            b.state.time .= t
-
-            # Record predicted obs + per-slice RMSE when we hit a prediction time
-            if b.dar40.k <= n_pred && t == b.dar40.time[b.dar40.k]
-                k = b.dar40.k
-                store!(b.dar40, k, b.depth, b.state.dar40)
-                sse = 0.0
-                for i in 1:n_obs_dar40
-                    sse += (b.dar40.dat[i,k] - dar40_obs[i])^2 / dar40_var
-                end
-                b.dar40.rmse[k] = sqrt(sse / n_obs_dar40)
-                b.dar40.k += 1
-            end
-            if b.k81.k <= n_pred && t == b.k81.time[b.k81.k]
-                k = b.k81.k
-                store!(b.k81, k, b.depth, b.state.age_k81)
-                sse = 0.0
-                for i in 1:n_obs_k81
-                    sse += (b.k81.dat[i,k] - k81_obs[i])^2 / k81_var
-                end
-                b.k81.rmse[k] = sqrt(sse / n_obs_k81)
-                b.k81.k += 1
-
-                # Equilibration check: comparing this slice to one eq_window slices back.
-                if k > eq_window
-                    Δk81   = 0.0
-                    Δdar40 = 0.0
-                    for i in 1:n_obs_k81
-                        Δk81   = max(Δk81,   abs(b.k81.dat[i,k]   - b.k81.dat[i,k-eq_window]))
-                    end
-                    for i in 1:n_obs_dar40
-                        Δdar40 = max(Δdar40, abs(b.dar40.dat[i,k] - b.dar40.dat[i,k-eq_window]))
-                    end
-                    if Δk81 < eq_atol_k81 && Δdar40 < eq_atol_dar40
-                        k_eq    = k
-                        t_eq    = b.k81.time[k]
-                        log_L_eq = -0.5 * (n_obs_k81*b.k81.rmse[k]^2 + n_obs_dar40*b.dar40.rmse[k]^2)
-                        break
-                    end
-                end
-            end
-        end
-    catch e
-        e isa DomainError || rethrow(e)
-        return -Inf
-    end
-
-    # Compute the log marginal likelihood.
-    # Δt_pred = 1 kyr (the spacing of b.k81.time). It's a constant w.r.t. θ so could be
-    # dropped, but including it keeps the result on a meaningful absolute scale.
-    Δt_pred = b.k81.time[2] - b.k81.time[1]
-    n_explicit = (k_eq == 0) ? (b.k81.k - 1) : k_eq
-    log_L_per_slice = Vector{Float64}(undef, n_explicit)
-    @inbounds for k in 1:n_explicit
-        log_L_per_slice[k] = -0.5 * (n_obs_k81*b.k81.rmse[k]^2 + n_obs_dar40*b.dar40.rmse[k]^2)
-    end
-
-    if k_eq == 0
-        # No equilibrium detected: integral is just the sum over the time grid.
-        log_Z = logsumexp(log_L_per_slice) + log(Δt_pred)
-    else
-        # Trapezoidal sum over the explicit transient + analytic plateau tail.
-        tail_log_weight = log(t1 - t_eq) + log_L_eq
-        log_Z = logsumexp([logsumexp(log_L_per_slice) + log(Δt_pred), tail_log_weight])
-    end
-
-    # Side-effect: pick the highest-likelihood slice so the plot's "best" annotation
-    # has something sensible to point at. argmax over an empty vector is undefined,
-    # so guard.
-    if n_explicit > 0
-        kbest = argmax(log_L_per_slice)
-        b.k81.kmin     = kbest
-        b.dar40.kmin   = kbest
-        b.joint.kmin   = kbest
-        b.k81.time_min   = b.k81.time[kbest]
-        b.dar40.time_min = b.dar40.time[kbest]
-        b.joint.time_min = b.joint.time[kbest]
-    end
-
-    return log_Z
 end
 
 function mixing_rate_discrete!(m, depth, depth_lim, m_clean, m_dirty, delta)
@@ -863,17 +644,27 @@ function add_clean_dirty_boundary!(ax,x, y; with_label=true)
 
     return
 end
-function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing)
+"""
+    plot_BasalMixingModelRun(b; k81_obs, dar40_obs, t_max=nothing, overlay=nothing)
+
+Render the standard four-panel figure for a single forward run `b`.
+
+`t_max` truncates the time-series and snapshot panels so that runs which only
+integrated 0 → t_max (e.g. an MAP re-run with duration |t_0|) don't show
+uninitialised buffer tails as a misleading zero trajectory.
+
+`overlay`, if given, is a NamedTuple `(b=b2, t_max=t_max2, label="kr81")`
+whose best-fit age and δ⁴⁰Ar are drawn on top of the primary in a distinct
+dashed style, so the secondary chain (e.g. kr81-only) can be compared
+visually to the primary (combined).
+"""
+function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing,overlay=nothing)
 
     states = b.states
     k81 = b.k81
     dar40 = b.dar40
     joint = b.joint
 
-    # Optional truncation. When the integration only covered 0 → t_max
-    # (e.g. the :sampled model_kind runs to |t_0|), restrict the time-series
-    # panel and the state-snapshot panels to that range to avoid showing
-    # uninitialised buffer tails as a misleading zero trajectory.
     t_max_val = t_max === nothing ? Float64(k81.time[end]) : Float64(t_max)
     k_last_pred  = searchsortedlast(k81.time, t_max_val)
     k_last_state = searchsortedlast(states.time, t_max_val)
@@ -881,6 +672,7 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     col_k81 = ["#487E3D","#8080F7","teal"]
     col_k81_transparent = [(c, 0.2) for c in col_k81]
     col_dar40 = "#BC401E"
+    col_overlay = :black
 
     if !isnothing(dar40_obs)
         fig = Figure(size=(1000,600))
@@ -897,9 +689,16 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
 
     add_clean_dirty_boundary!(ax0, 0.98, -b.depth_lim)
     hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
-    
+
     jj = findall(b.depth .>= b.depth_lim)
     scatter!(ax0,b.mixing_rate[jj],-b.depth[jj];color=:black,markersize=5)
+
+    if overlay !== nothing
+        b2 = overlay.b
+        jj2 = findall(b2.depth .>= b2.depth_lim)
+        lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
+               color=col_overlay, linewidth=1.5, linestyle=:dash)
+    end
 
     ## PANEL 1: Depth versus closed-system age
     ax1 = Axis(fig[1,end+1], limits=((200,800),(-3053,-3035)), xlabel="⁸¹K closed system age (kyr)", ylabel="Depth (m)", ygridvisible = false )
@@ -909,8 +708,7 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
 
     add_clean_dirty_boundary!(ax1, 0.28, -b.depth_lim,with_label=false)
     hlines!(ax1,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
-    
-    # Plot time slices from model
+
     for k in 1:k_last_state
         t = states.time[k]
         lines!(ax1,states.age_k81[:,k],-b.depth,color=:grey50,linewidth=0.5)
@@ -921,10 +719,18 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
     lines!(ax1,states.age_k81[:,k],-b.depth,color=:black,linewidth=2)
 
-    # Plot data too
+    if overlay !== nothing
+        b2 = overlay.b
+        t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
+        k_last_state2 = searchsortedlast(b2.states.time, t2)
+        k2 = argmin(abs.(b2.states.time[1:k_last_state2] .- b2.joint.time_min))
+        lines!(ax1, b2.states.age_k81[:,k2], -b2.depth;
+               color=col_overlay, linewidth=2, linestyle=:dash)
+    end
+
     errorbars!(ax1, k81_obs.age, -k81_obs.depth, k81_obs.age_hi, k81_obs.age_lo, color=col_k81, direction=:x, whiskerwidth=8)
     scatter!(ax1, k81_obs.age, -k81_obs.depth, color=col_k81, marker=:circle, markersize=12)
-    
+
     ## PANEL 2 (optional): depth vs d40Ar_atm concentration
     if !isnothing(dar40_obs)
         ax3 = Axis(fig[1,end+1], limits=((-0.1,0.62),(-3053,-3035)), xlabel="δ⁴⁰ArATM (‰)", ylabel="Depth (m)" )
@@ -932,7 +738,6 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         ax3.yticks = (d,string.(abs.(d)))
         ax3.xticks = 0.0:0.2:0.6
 
-        # Plot time slices from model
         for k in 1:k_last_state
             t = states.time[k]
             lines!(ax3,states.dar40[:,k],-b.depth,color=:grey50,linewidth=0.5)
@@ -943,7 +748,15 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
         lines!(ax3,states.dar40[:,k],-b.depth,color=:black,linewidth=2.5)
 
-        # Plot data too
+        if overlay !== nothing
+            b2 = overlay.b
+            t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
+            k_last_state2 = searchsortedlast(b2.states.time, t2)
+            k2 = argmin(abs.(b2.states.time[1:k_last_state2] .- b2.joint.time_min))
+            lines!(ax3, b2.states.dar40[:,k2], -b2.depth;
+                   color=col_overlay, linewidth=2, linestyle=:dash)
+        end
+
         errorbars!(ax3, dar40_obs[!,:dar40],-dar40_obs[!,"depth"], dar40_obs[!,:dar40_err], dar40_obs[!,:dar40_err], color=col_dar40, direction=:x, whiskerwidth=8)
         scatter!(ax3, dar40_obs[!,:dar40],-dar40_obs[!,"depth"], color=col_dar40, marker=:circle, markersize=12)
     end
@@ -952,9 +765,7 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     # Display in signed kyr (negative = past, 0 = present day). The integrator
     # runs in positive elapsed time τ ∈ [0, t_max_val]; the curve shown here is
     # x(τ) = τ - t_max_val, so the trajectory starts at t_0 = -t_max_val and
-    # ends at t_end = 0. The x-axis is fixed at [-3000, 0] regardless of mode
-    # so a :sampled run with |t_0| < 3000 leaves visible empty space to the
-    # left of the curve — exactly the part the model never integrated.
+    # ends at t_end = 0.
     ax2 = Axis(fig[1,end+1], limits=((-3000,0),(0,900)), xlabel="Time (kyr)", ylabel="⁸¹K closed system age (kyr)" )
     ax2.xticks = -3000:1000:0
     ax2.yticks = 0:100:900
@@ -963,7 +774,16 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         lines!(ax2,k81.time[1:k_last_pred] .- t_max_val,k81.dat[j,1:k_last_pred],color=col_k81[j],linewidth=2)
     end
 
-    # Plot closed-system age from data
+    if overlay !== nothing
+        b2 = overlay.b
+        t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
+        k_last_pred2 = searchsortedlast(b2.k81.time, t2)
+        for (j,d) in enumerate(b2.k81.depth)
+            lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
+                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+        end
+    end
+
     hlines!(ax2,k81_obs.age;color=col_k81,linewidth=2,linestyle=:dash)
     hspan!(ax2, k81_obs.age .- k81_obs.age_lo, k81_obs.age .+ k81_obs.age_hi; color=col_k81_transparent)
 
@@ -972,19 +792,16 @@ end
 
 """
     save_ensemble_results(path; chain, k81, dar40, depth, setup, priors,
-                                sampler_choice, model_kind=:profile)
+                                sampler_choice, likelihood=:combined)
 
 Persist a sampled ensemble to a JLD2 file. If `path === nothing`, no-op. Pass
 all other arguments as keywords. Companion to `load_ensemble_results`.
 
-`model_kind` records which `@model` produced the chain (`:profile` or
-`:sampled`) — `plot_ensemble` uses this to decide whether the MAP best-fit
-re-run should integrate to t1=3000 and pick `argmin(rmse)` (profile) or
-integrate exactly to the chain's MAP `time_pred` (sampled). Defaults to
-`:profile` for backwards compatibility with pre-existing snapshots.
+`likelihood` records which observation channels the chain was conditioned on
+(`:combined`, `:kr81`, or `:ar40`). Defaults to `:combined`.
 """
 function save_ensemble_results(path; chain, k81, dar40, depth, setup, priors,
-                               sampler_choice, model_kind::Symbol=:profile)
+                               sampler_choice, likelihood::Symbol=:combined)
     if path === nothing
         println("Chain not saved - no path given.")
         return
@@ -992,7 +809,7 @@ function save_ensemble_results(path; chain, k81, dar40, depth, setup, priors,
     mkpath(dirname(path))
     JLD2.jldsave(path;
                  chain, k81, dar40, depth, setup, priors,
-                 sampler_choice, model_kind)
+                 sampler_choice, likelihood)
     println("Saved chain to ", path)
     return
 end
@@ -1003,8 +820,8 @@ end
 
 Read a JLD2 snapshot written by `run_basalmixing_ensemble.jl`. Returns a
 NamedTuple with `(chain, k81, dar40, depth, setup, priors, sampler_choice,
-model_kind)`. Old snapshots that pre-date the `model_kind` field default to
-`:profile`.
+likelihood)`. Old snapshots that pre-date the `likelihood` field default to
+`:combined`.
 """
 function load_ensemble_results(path::String)
     isfile(path) || error("ensemble results file not found: $path")
@@ -1016,7 +833,7 @@ function load_ensemble_results(path::String)
         setup = haskey(f, "setup") ? f["setup"] : ""
         priors = f["priors"]
         sampler_choice = haskey(f, "sampler_choice") ? f["sampler_choice"] : :unknown
-        model_kind = haskey(f, "model_kind") ? f["model_kind"] : :profile
-        return (; chain, k81, dar40, depth, setup, priors, sampler_choice, model_kind)
+        likelihood = haskey(f, "likelihood") ? f["likelihood"] : :combined
+        return (; chain, k81, dar40, depth, setup, priors, sampler_choice, likelihood)
     end
 end
