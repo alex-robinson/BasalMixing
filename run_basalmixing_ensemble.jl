@@ -89,11 +89,64 @@ priors = (
 )
 
 """
+    basal_mixing_nuts(k81_age_obs, dar40_obs, geom, priors, likelihood)
+
+NUTS-compatible Bayesian model. Same structure as `basal_mixing`, but uses
+the ODE-based forward integrator `run_basal_mixing_ode` (Tsit5 with adaptive
+stepping) so the likelihood is differentiable w.r.t. all parameters
+including `t_0`. `geom` is a `BasalMixingGeometry` NamedTuple — pass the one
+allocated for the depth grid; no per-thread buffer pool is needed because
+the ODE allocates parametrically per call.
+
+The Euler-based `basal_mixing` below is kept for the Emcee path. Both share
+the same prior block and likelihood-gating logic.
+"""
+@model function basal_mixing_nuts(k81_age_obs, dar40_obs, geom, priors, likelihood::Symbol)
+
+    ## Set priors ##
+    delta     = priors.delta   isa Distribution ? delta   ~ priors.delta   : priors.delta
+    m_clean   = priors.m_clean isa Distribution ? m_clean ~ priors.m_clean : priors.m_clean
+    f_dirty   = priors.f_dirty isa Distribution ? f_dirty ~ priors.f_dirty : priors.f_dirty
+    t_old     = priors.t_old   isa Distribution ? t_old   ~ priors.t_old   : priors.t_old
+    F_ar40    = priors.F_ar40  isa Distribution ? F_ar40  ~ priors.F_ar40  : priors.F_ar40
+    σ_k81     = priors.σ_k81   isa Distribution ? σ_k81   ~ priors.σ_k81   : priors.σ_k81
+    σ_dar40   = priors.σ_dar40 isa Distribution ? σ_dar40 ~ priors.σ_dar40 : priors.σ_dar40
+    t_0       = priors.t_0     isa Distribution ? t_0     ~ priors.t_0     : priors.t_0
+
+    duration = -t_0
+    p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty,
+         t_old=t_old, F_ar40=F_ar40, t_target=duration)
+    k81_age_pred_v, dar40_pred_v, ok = run_basal_mixing_ode(p, geom)
+
+    if ok
+        k81_age_pred := k81_age_pred_v
+        dar40_pred   := dar40_pred_v
+    else
+        # ODE failed (very rare under sensible params); drive the likelihood
+        # to ~-Inf with predictions far from observations.
+        k81_age_pred := fill(typeof(k81_age_pred_v[1])(1e8), length(k81_age_obs))
+        dar40_pred   := fill(typeof(dar40_pred_v[1])(1e8),   length(dar40_obs))
+    end
+
+    if likelihood === :combined
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+    elseif likelihood === :kr81
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
+    elseif likelihood === :ar40
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+    else
+        error("Unknown likelihood: $likelihood")
+    end
+
+    return
+end
+
+"""
     basal_mixing(k81_age_obs, dar40_obs, bs, dat, dt, priors, likelihood)
 
-Sampled-time Bayesian model. Draws `t_0` from `priors.t_0` (signed kyr,
-negative = past) and integrates the forward model exactly once over duration
-|t_0|, then compares the predicted endpoint state to the observations.
+Emcee-compatible (gradient-free) Bayesian model. Uses the hand-rolled Euler
+integrator `RunBasalMixingModelToTime!` with a per-thread buffer pool.
 
 `likelihood` selects which observation channel(s) constrain the posterior:
 - `:combined` — both ⁸¹Kr ages and δ⁴⁰Ar (the default standard run)
@@ -160,17 +213,30 @@ bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=d
       for _ in 1:Threads.maxthreadid()]
 
 ## Sampler selection ##
+# :nuts        -> No-U-Turn Sampler via Turing's `NUTS`. Requires the
+#                 ODE-based forward model (`run_basal_mixing_ode`) and
+#                 ForwardDiff. The right choice when you want a true Bayesian
+#                 posterior with no stuck walkers.
 # :emcee       -> Affine-invariant ensemble sampler (Goodman & Weare). Robust to
 #                 correlations, no per-parameter tuning, no gradients required.
-#                 Default.
+#                 Watch for boundary-stuck walkers — see derived_time histogram.
 # :mh_ram      -> Robust Adaptive Metropolis (Vihola 2012): online-adapts the
 #                 full proposal covariance toward target acceptance α.
 # :mh_tuned    -> MH with per-parameter LinkedRW proposals.
 # :mh_default  -> Turing's default MH (uses priors as proposals; poor mixing here).
-sampler_choice = :emcee
+sampler_choice = :nuts
 
 n_samples = 10_000   # used for the MH variants; per-chain count
 n_chains  = 4
+
+# NUTS-specific tuning: adaptation and post-adapt sample counts (per chain).
+n_adapts_nuts = 500
+n_samples_nuts = 500
+target_accept_nuts = 0.65
+
+# Precompute the ODE-path geometry (Float64-only depth/thickness data).
+# Cheap to allocate; reused by every NUTS likelihood eval.
+geom = BasalMixingGeometry(depth, 3040.0, 3053.44, k81.depth, dar40.depth)
 
 # Optional per-parameter linked-space variance overrides for :mh_tuned.
 mh_variances = NamedTuple()
@@ -187,9 +253,23 @@ for likelihood in likelihoods
     println("Running likelihood = :$likelihood")
     println("========================================")
 
-    model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors, likelihood)
+    if sampler_choice === :nuts
+        model = basal_mixing_nuts(k81.age, dar40.dar40, geom, priors, likelihood)
+    else
+        model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors, likelihood)
+    end
 
-    if sampler_choice === :mh_default
+    if sampler_choice === :nuts
+        # max_depth=8 (256 leapfrogs/draw worst case) caps adaptation cost.
+        # The AD-timing diagnostic shows ~60 ms/gradient → ≤15 s/draw at depth 8.
+        # Default max_depth=10 lets adaptation drift to 60 s/draw, which is what
+        # the killed smoke test was doing.
+        spl = NUTS(n_adapts_nuts, target_accept_nuts;
+                   max_depth=8,
+                   adtype=Turing.ADTypes.AutoForwardDiff())
+        chain = sample(model, spl, MCMCThreads(), n_samples_nuts, n_chains;
+                       progress=true)
+    elseif sampler_choice === :mh_default
         spl = MH()
         chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
     elseif sampler_choice === :mh_tuned
@@ -213,7 +293,7 @@ for likelihood in likelihoods
     println("Sampler: $sampler_choice  |  acceptance ≈ ",
             round(acceptance_rate(chain), digits=3))
 
-    results_path = "results/emcee-chain-$(likelihood).jld2"
+    results_path = "results/$(sampler_choice)-chain-$(likelihood).jld2"
     save_ensemble_results(results_path;
                           chain, k81, dar40, depth, setup, priors,
                           sampler_choice, likelihood)

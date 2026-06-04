@@ -497,6 +497,251 @@ function RunBasalMixingModelToTime!(p, b, t_target, dat; t0::Float64=0.0, dt::Fl
     return true
 end
 
+### ODE-based forward model (NUTS / ForwardDiff path) ##############
+##
+## The mutable-buffer code above is the Emcee path: hand-rolled Euler in
+## positive elapsed time, all buffers `Vector{Float64}`. It can't take a
+## `Dual`-valued `t_target` (`0:dt:t_target` breaks) and the `Vector{Float64}`
+## buffers can't hold ForwardDiff `Dual`s anyway.
+##
+## The functions below are the AD-friendly path: allocating, `Vector{T}`-typed,
+## and call `OrdinaryDiffEq.Tsit5` so `tspan = (0, t_target)` is differentiable
+## w.r.t. `t_target`. Geometry (depth, thickness, idx_clean_mask) stays
+## `Float64`; only the state and the (delta, m_clean, f_dirty, t_old, F_ar40)
+## dependent quantities are typed by `T`.
+
+"""
+    compute_mixing_rate_smooth(depth, depth_lim, m_clean, m_dirty, delta; sharpness=50.0)
+
+Allocating, AD-friendly twin of `mixing_rate_smooth!`. Returns a fresh
+`Vector{T}` where `T = promote_type(typeof(m_clean), typeof(m_dirty), typeof(delta))`.
+Matches `mixing_rate_smooth!` exactly for `Float64` inputs.
+"""
+function compute_mixing_rate_smooth(depth::AbstractVector{<:Real},
+                                    depth_lim::Real,
+                                    m_clean::Real, m_dirty::Real, delta::Real;
+                                    sharpness::Real=50.0)
+    T = promote_type(typeof(m_clean), typeof(m_dirty), typeof(delta))
+    n = length(depth)
+    m = zeros(T, n)
+    for j in 1:n-1
+        d = 0.5 * (depth[j] + depth[j+1])
+        w1 = 0.5 * (1 + tanh(sharpness * (d - depth_lim) / delta))
+        w2 = 0.5 * (1 + tanh(sharpness * (d - depth_lim - delta) / delta))
+        m[j] = m_dirty * w1 * w2 + m_clean * w1 * (1 - w2)
+    end
+    # m[end] = 0 already from `zeros`
+    return m
+end
+
+"""
+    basal_mixing_rhs!(du, u, p, t)
+
+ODE right-hand side for the basal-mixing forward model. State vector `u`
+packs `c_k81` (entries 1:N) and `c_ar40` (entries N+1:2N). Parameters `p` is
+a `NamedTuple` carrying both the sampled scalars (`t_old`, `F_ar40`) and the
+precomputed geometry (`thickness`, `mixing_rate`, `idx_clean_mask`,
+`k81_decay_constant`, `N`). `mixing_rate` is precomputed once per likelihood
+eval by `compute_mixing_rate_smooth` and threaded in via `p`.
+
+Mirrors the Euler integrator's semantics exactly:
+- k81 decays at rate λ, zeroed for clean-ice cells once `t > t_old`.
+- Mixing flux is centred-difference between adjacent cells; clean-ice cells
+  receive no mixing flux (their endpoint contributions are skipped).
+- ⁴⁰Ar receives a bottom-source flux `F_ar40 / thickness[end]` in the
+  deepest cell.
+"""
+function basal_mixing_rhs!(du, u, p, t)
+    N = p.N
+    c_k81  = @view u[1:N]
+    c_ar40 = @view u[N+1:2N]
+    du_k81  = @view du[1:N]
+    du_ar40 = @view du[N+1:2N]
+
+    λ          = p.k81_decay_constant
+    t_old      = p.t_old
+    F_ar40     = p.F_ar40
+    thickness  = p.thickness
+    mixing_rate = p.mixing_rate
+    clean_mask  = p.idx_clean_mask
+    Tz = eltype(du)
+    zero_T = zero(Tz)
+
+    # k81 decay (zeroed for clean ice past t_old). ar40 starts at zero.
+    decay_kills_clean = (t > t_old)
+    @inbounds for j in 1:N
+        if decay_kills_clean && clean_mask[j]
+            du_k81[j] = zero_T
+        else
+            du_k81[j] = -λ * c_k81[j]
+        end
+        du_ar40[j] = zero_T
+    end
+
+    # Mixing flux between adjacent cells; skip endpoints that are clean-ice.
+    @inbounds for j in 1:N-1
+        Δz_interface = 0.5 * (thickness[j] + thickness[j+1])
+        D = mixing_rate[j]                  # already has Lref=1 absorbed
+        flux_k81  = D * (c_k81[j+1]  - c_k81[j])  / Δz_interface
+        flux_ar40 = D * (c_ar40[j+1] - c_ar40[j]) / Δz_interface
+        if !clean_mask[j]
+            du_k81[j]   += flux_k81  / thickness[j]
+            du_ar40[j]  += flux_ar40 / thickness[j]
+        end
+        if !clean_mask[j+1]
+            du_k81[j+1]  -= flux_k81  / thickness[j+1]
+            du_ar40[j+1] -= flux_ar40 / thickness[j+1]
+        end
+    end
+
+    # ar40 bottom source flux into the deepest cell only.
+    du_ar40[N] += F_ar40 / thickness[N]
+
+    return nothing
+end
+
+"""
+    BasalMixingGeometry(depth, depth_lim, depth_bedrock, k81_obs_depths, dar40_obs_depths)
+        -> NamedTuple
+
+Precompute everything that's `Float64`-only and depends solely on the depth
+grid (not on sampled parameters). Pass the returned NamedTuple to
+`run_basal_mixing_ode` to avoid recomputing it for every likelihood eval.
+
+Fields: `N`, `depth`, `depth_lim`, `thickness`, `idx_clean_mask`,
+`k81_interp` (`(j_idx, frac)` tuples for each obs depth), `dar40_interp`.
+"""
+function BasalMixingGeometry(depth::Vector{Float64}, depth_lim::Float64,
+                             depth_bedrock::Float64,
+                             k81_obs_depths::Vector{Float64},
+                             dar40_obs_depths::Vector{Float64})
+    N = length(depth)
+    thickness = cell_thickness(depth, depth_bedrock)
+    idx_clean_mask = depth .<= depth_lim   # BitVector
+
+    function _interp(obs_depths)
+        out = Tuple{Int,Float64}[]
+        for d in obs_depths
+            j = findlast(depth .<= d)
+            (isnothing(j) || j == N) && error("obs depth $d outside grid")
+            frac = (d - depth[j]) / (depth[j+1] - depth[j])
+            push!(out, (j, frac))
+        end
+        return out
+    end
+
+    k81_interp   = _interp(k81_obs_depths)
+    dar40_interp = _interp(dar40_obs_depths)
+
+    return (; N, depth, depth_lim, thickness, idx_clean_mask, k81_interp, dar40_interp)
+end
+
+# Helper: linear interpolation of a field `f` at the precomputed obs locations.
+@inline function _interp_at_obs(f::AbstractVector, interp::Vector{Tuple{Int,Float64}})
+    T = eltype(f)
+    out = Vector{T}(undef, length(interp))
+    @inbounds for (i, (j, frac)) in enumerate(interp)
+        out[i] = f[j] + frac * (f[j+1] - f[j])
+    end
+    return out
+end
+
+"""
+    run_basal_mixing_ode(params, geom; solver=Tsit5(), reltol=1e-6, abstol=1e-8)
+        -> (k81_age_pred, dar40_pred, success)
+
+ODE-based forward model used by the NUTS @model. Integrates the coupled
+(k81, ar40) system on positive elapsed time `0 → params.t_target` using
+`OrdinaryDiffEq`, then linearly interpolates the predicted ⁸¹Kr closed-system
+age and δ⁴⁰Ar at the observation depths.
+
+`params` is a NamedTuple with fields `delta, m_clean, f_dirty, t_old, F_ar40,
+t_target`. All are `Real` (possibly `Dual`). `geom` is what
+`BasalMixingGeometry` returned.
+
+`success` is `true` if the ODE integration finished cleanly. On failure
+(e.g. solver max-iters hit), returns predictions filled with `1e8` so the
+likelihood is driven to ~-Inf without throwing.
+"""
+function run_basal_mixing_ode(params, geom;
+                              solver=Tsit5(),
+                              reltol::Float64=1e-6,
+                              abstol::Float64=1e-8)
+    delta    = params.delta
+    m_clean  = params.m_clean
+    f_dirty  = params.f_dirty
+    t_old    = params.t_old
+    F_ar40   = params.F_ar40
+    t_target = params.t_target
+
+    N         = geom.N
+    depth     = geom.depth
+    depth_lim = geom.depth_lim
+    thickness = geom.thickness
+    clean_mask = geom.idx_clean_mask
+
+    T = promote_type(typeof(delta), typeof(m_clean), typeof(f_dirty),
+                     typeof(t_old), typeof(F_ar40), typeof(t_target))
+
+    # Precompute mixing_rate (T-valued).
+    mixing_rate = compute_mixing_rate_smooth(depth, depth_lim,
+                                             m_clean, m_clean*f_dirty, delta)
+
+    # Modern ⁴⁰Ar reference for the initial condition (Float64).
+    Ar40_00 = calc_ar40_with_aging(0.0, 0.0)
+
+    # Initial state: c_k81 = 1, c_ar40 = Ar40_00.
+    u0 = Vector{T}(undef, 2N)
+    @inbounds for j in 1:N
+        u0[j]     = one(T)
+        u0[N+j]   = T(Ar40_00)
+    end
+
+    p_ode = (; N,
+             k81_decay_constant = decay_constant(229.0),
+             t_old, F_ar40,
+             thickness, mixing_rate, idx_clean_mask=clean_mask)
+
+    tspan = (zero(T), t_target)
+    prob = ODEProblem{true}(basal_mixing_rhs!, u0, tspan, p_ode)
+
+    sol = solve(prob, solver;
+                reltol=reltol, abstol=abstol,
+                save_everystep=false, save_start=false,
+                saveat=[t_target])
+
+    if sol.retcode !== ReturnCode.Success
+        return (fill(T(1e8), length(geom.k81_interp)),
+                fill(T(1e8), length(geom.dar40_interp)),
+                false)
+    end
+
+    u_final = sol.u[end]
+    c_k81_final  = @view u_final[1:N]
+    c_ar40_final = @view u_final[N+1:2N]
+
+    # Concentration → age, Ar40 → δ⁴⁰Ar.
+    # `concentration_to_age` is `log2`, which DomainErrors on c ≤ 0. With
+    # reasonable params and a well-resolved Tsit5 solve this shouldn't happen;
+    # if it does we want a finite (huge) prediction rather than an exception.
+    age_k81_final = similar(c_k81_final)
+    @inbounds for j in 1:N
+        c = c_k81_final[j]
+        age_k81_final[j] = c > 0 ? -229.0 * log2(c) : T(1e8)
+    end
+    dar40_final = similar(c_ar40_final)
+    @inbounds for j in 1:N
+        dar40_final[j] = calc_delta_ar40(c_ar40_final[j], Ar40_00, t_old)
+    end
+
+    k81_pred   = _interp_at_obs(age_k81_final, geom.k81_interp)
+    dar40_pred = _interp_at_obs(dar40_final,   geom.dar40_interp)
+
+    return k81_pred, dar40_pred, true
+end
+
+####################################################################
+
 function mixing_rate_discrete!(m, depth, depth_lim, m_clean, m_dirty, delta)
     n = length(m)
     m .= 0.0
@@ -603,19 +848,19 @@ function mixing_tendency!(dRdt::Vector{Float64}, R::Vector{Float64}, Φ::Vector{
     return
 end
 
-function calc_delta_ar40(ar40::Float64, ar40_ref::Float64, t_kyr)
-    return (ar40 / ar40_ref - 1.0) * 1000.0 - (0.066/1000.0) * max(t_kyr, 0.0)
+function calc_delta_ar40(ar40::Real, ar40_ref::Real, t_kyr::Real)
+    return (ar40 / ar40_ref - 1.0) * 1000.0 - (0.066/1000.0) * max(t_kyr, zero(t_kyr))
 end
 
-function calc_ar40_with_aging(t_kyr::Float64, t_old::Float64;
-    air_content::Float64 = 0.08,        # fraction
-    f_ar40_atm_pd::Float64 = 0.00934    # atmospheric ⁴⁰Ar volume fraction today
+function calc_ar40_with_aging(t_kyr::Real, t_old::Real;
+    air_content::Real = 0.08,        # fraction
+    f_ar40_atm_pd::Real = 0.00934    # atmospheric ⁴⁰Ar volume fraction today
     )
     # Assumes δ40ar=0, that surface concentration is in equilibrium with the air at that time.
 
     # Reference ⁴⁰Ar content of the layer [cc m⁻³]
     # volume [100^3 cc m⁻³] × air_content × f_ar40_atm
-    ar40 = 100^3 * (air_content * f_ar40_atm_pd) * (1 - 0.066e-6 * max(t_kyr-t_old, 0.0) )
+    ar40 = 100^3 * (air_content * f_ar40_atm_pd) * (1 - 0.066e-6 * max(t_kyr-t_old, zero(t_kyr-t_old)) )
 
     #%% calculate amount of argon (in ccs) starting in ice
     #TAC=0.08; % average TAC in basal ice

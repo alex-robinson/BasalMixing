@@ -36,6 +36,24 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
 end
 
 """
+    logp_mask(df, logp_window) -> BitVector
+
+Pragmatic filter for unmixed-chain visualisations: keep only samples with
+`logjoint >= max(logjoint) - logp_window`. 10 logp below MAP is a posterior
+weight of ~exp(-10) ≈ 4.5e-5 — negligible. Anything below that contributes
+nothing to the posterior in a well-mixed chain, so if many samples accumulate
+there they're an unmixedness artefact (e.g. Emcee walkers stuck at a prior
+boundary) and should be excluded from the histogram / pdf estimates.
+
+The raw logp scatter plot is left UNfiltered — that's where you want to *see*
+the unmixed structure as a diagnostic. Set `logp_window=Inf` to disable.
+"""
+function logp_mask(df, logp_window::Float64)
+    isfinite(logp_window) || return trues(nrow(df))
+    return df.logjoint .>= maximum(df.logjoint) - logp_window
+end
+
+"""
     map_best_run(chain, k81, dar40, depth) -> (b, t_elapsed_map, p_best, df, best_idx)
 
 Re-run the forward model at the chain's MAP parameters. The sampled-time model
@@ -93,6 +111,7 @@ function plot_ensemble(;
     sampler_choice::Symbol=:unknown,
     likelihood::Symbol=:combined,
     secondary=nothing,
+    logp_window::Float64=10.0,
     outdir::AbstractString="plots",
     save_figures::Bool=true,
 )
@@ -139,6 +158,15 @@ function plot_ensemble(;
     end
 
     ## Marginal histograms vs priors ##
+    # Filter to samples within `logp_window` of MAP — see logp_mask docstring.
+    mask_p = logp_mask(primary.df, logp_window)
+    mask_s = sec === nothing ? nothing : logp_mask(sec.df, logp_window)
+    n_kept_p = count(mask_p)
+    n_kept_s = mask_s === nothing ? 0 : count(mask_s)
+    println("Histogram filter: primary kept $n_kept_p/$(nrow(primary.df)) " *
+            "(logp_window=$logp_window)" *
+            (sec === nothing ? "" : "; secondary kept $n_kept_s/$(nrow(sec.df))"))
+
     fig_hist = Figure(size=(900, 700))
     ipar = 0
     for (param, label) in zip(params, labels)
@@ -146,12 +174,12 @@ function plot_ensemble(;
         ipar += 1
         row, col = divrem(ipar-1, 2)
         ax = Axis(fig_hist[row+1, col+1], xlabel=label, ylabel="density")
-        hist!(ax, primary.df[!, param]; bins=20, normalization=:pdf,
+        hist!(ax, primary.df[mask_p, param]; bins=20, normalization=:pdf,
               color=(:steelblue, 0.7), label=primary_label)
         if sec !== nothing && string(param) in names(sec.df)
             # Use stephist (outline only) so the secondary doesn't visually
             # bury the primary fill.
-            stephist!(ax, sec.df[!, param]; bins=20, normalization=:pdf,
+            stephist!(ax, sec.df[mask_s, param]; bins=20, normalization=:pdf,
                       color=:black, linewidth=2, linestyle=:dash,
                       label=secondary_label)
         end
@@ -210,25 +238,41 @@ function plot_ensemble_comparison(primary_path::AbstractString,
 end
 
 """
-    derived_time_distribution(results::NamedTuple) -> (t_grid, p_t, map_t)
+    derived_time_distribution(results::NamedTuple;
+                              t_min=-3000.0, t_max=0.0,
+                              logp_window=10.0) -> (t_grid, p_t, map_t, n_kept, n_total)
 
 Empirical posterior on `t_0` (signed kyr BP) from the chain. The sampled-time
 model puts `t_0` directly in the chain, so this is just a histogram on the
-1-kyr grid spanning the prior support — no re-running needed.
+1-kyr grid spanning the prior support.
+
+`logp_window` filters out samples with `logjoint < max(logjoint) - logp_window`
+(see `logp_mask`) — needed when the Emcee chain has walkers stuck at a prior
+boundary that contribute zero posterior weight but inflate the raw histogram.
+
+`map_t` is the `t_0` of the `argmax(logjoint)` sample (NOT the histogram mode),
+which is the right summary when the histogram is concentrated by unmixedness
+rather than by likelihood.
 """
 function derived_time_distribution(results::NamedTuple;
                                    t_min::Float64=-3000.0,
-                                   t_max::Float64=0.0)
+                                   t_max::Float64=0.0,
+                                   logp_window::Float64=10.0)
     df = DataFrame(results.chain)
+    df.logjoint = vec(results.chain[:logjoint])
+    mask = logp_mask(df, logp_window)
+    n_kept = count(mask)
     t_grid = collect(t_min:1.0:t_max)
     counts = zeros(Float64, length(t_grid))
-    for v in df.t_0
+    for v in df.t_0[mask]
         k = clamp(round(Int, v - t_grid[1]) + 1, 1, length(t_grid))
         counts[k] += 1.0
     end
-    p_t   = counts ./ sum(counts)   # Δt = 1 kyr → density in 1/kyr
-    map_t = t_grid[argmax(p_t)]
-    return (t_grid=t_grid, p_t=p_t, map_t=map_t)
+    total = sum(counts)
+    p_t = total > 0 ? counts ./ total : counts
+    # MAP from argmax(logjoint), not histogram mode.
+    map_t = df.t_0[argmax(df.logjoint)]
+    return (t_grid=t_grid, p_t=p_t, map_t=map_t, n_kept=n_kept, n_total=nrow(df))
 end
 
 """
@@ -239,25 +283,29 @@ secondary chain's pdf as a dashed black line.
 """
 function plot_derived_time(results::NamedTuple;
                            secondary=nothing,
+                           logp_window::Float64=10.0,
                            outdir::AbstractString="plots",
                            save_figures::Bool=true)
-    d     = derived_time_distribution(results)
+    d     = derived_time_distribution(results; logp_window=logp_window)
     setup = get(results, :setup, "")
     likelihood = get(results, :likelihood, :combined)
+    println("Derived-time filter: primary kept $(d.n_kept)/$(d.n_total) " *
+            "(logp_window=$logp_window)")
 
     fig = Figure(size=(720, 420))
     ax  = Axis(fig[1, 1];
                xlabel = "t_0 (kyr)",
                ylabel = "density (1/kyr)",
-               title  = "Posterior on t_0  (primary :$likelihood)")
+               title  = "Posterior on t_0  (primary :$likelihood, logp_window=$logp_window)")
     lines!(ax, d.t_grid, d.p_t; linewidth=2, color=:steelblue,
            label="primary (:$likelihood)")
     vlines!(ax, [d.map_t]; color=:red, linewidth=2,
             label="MAP = $(round(Int, d.map_t)) kyr")
 
     if secondary !== nothing
-        d2 = derived_time_distribution(secondary)
+        d2 = derived_time_distribution(secondary; logp_window=logp_window)
         sec_lik = get(secondary, :likelihood, :unknown)
+        println("Derived-time filter: secondary kept $(d2.n_kept)/$(d2.n_total)")
         lines!(ax, d2.t_grid, d2.p_t; linewidth=2, color=:black,
                linestyle=:dash, label="secondary (:$sec_lik)")
     end
