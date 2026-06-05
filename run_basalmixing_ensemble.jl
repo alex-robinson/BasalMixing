@@ -73,9 +73,14 @@ function acceptance_rate(chain)
 end
 
 priors = (
-    delta       = Uniform(0.3, 2.0),    # 1 m
+    # Widened delta and f_dirty (2026-06-05) — the original (0.3, 2.0) and
+    # (4.0, 6.5) bounds were clipping the posterior: both Emcee and NUTS
+    # piled up on their upper edges. New bounds keep the priors physically
+    # plausible (higher values are unphysical) while letting the typical
+    # set sit in the interior, which NUTS needs for sane step-size adaptation.
+    delta       = Uniform(0.3, 3.0),    # transition-zone thickness (m)
     m_clean     = truncated(Normal(0.03, 0.002), lower=0.0), # 0.03 m/kyr
-    f_dirty     = Uniform(4.0, 6.5),                        # 0.18 m/kyr / 0.03 m/kyr => f=6x
+    f_dirty     = Uniform(3.0, 8.0),    # dirty/clean mixing-rate ratio
     t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
     F_ar40      = Uniform(0.004,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
     σ_k81 = 30.0,
@@ -116,7 +121,11 @@ the same prior block and likelihood-gating logic.
     duration = -t_0
     p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty,
          t_old=t_old, F_ar40=F_ar40, t_target=duration)
-    k81_age_pred_v, dar40_pred_v, ok = run_basal_mixing_ode(p, geom)
+    # Loose ODE tolerance — 1e-4 still ~100× tighter than σ_k81=30 kyr and
+    # σ_dar40=0.03 ‰. The probe with this setting agreed with Euler to
+    # within max |Δage| = 0.14 kyr, max |Δdar40| = 4.5e-4 ‰.
+    k81_age_pred_v, dar40_pred_v, ok = run_basal_mixing_ode(p, geom;
+                                                            reltol=1e-4, abstol=1e-7)
 
     if ok
         k81_age_pred := k81_age_pred_v
@@ -230,8 +239,11 @@ n_samples = 10_000   # used for the MH variants; per-chain count
 n_chains  = 4
 
 # NUTS-specific tuning: adaptation and post-adapt sample counts (per chain).
-n_adapts_nuts = 500
-n_samples_nuts = 500
+# Tuned (2026-06-05) so each chain fits inside the harness ~25 min kill window:
+# probe data shows ~6.4 s/draw post-smoothing, so 250 draws ≈ 26 min single-chain.
+# 4 chains × MCMCThreads in parallel → 600 post-adapt samples total at ~25 min wall.
+n_adapts_nuts = 100
+n_samples_nuts = 150
 target_accept_nuts = 0.65
 
 # Precompute the ODE-path geometry (Float64-only depth/thickness data).

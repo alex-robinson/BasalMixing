@@ -541,11 +541,17 @@ ODE right-hand side for the basal-mixing forward model. State vector `u`
 packs `c_k81` (entries 1:N) and `c_ar40` (entries N+1:2N). Parameters `p` is
 a `NamedTuple` carrying both the sampled scalars (`t_old`, `F_ar40`) and the
 precomputed geometry (`thickness`, `mixing_rate`, `idx_clean_mask`,
-`k81_decay_constant`, `N`). `mixing_rate` is precomputed once per likelihood
-eval by `compute_mixing_rate_smooth` and threaded in via `p`.
+`k81_decay_constant`, `N`, `τ_smooth`).
 
-Mirrors the Euler integrator's semantics exactly:
-- k81 decays at rate λ, zeroed for clean-ice cells once `t > t_old`.
+Mirrors the Euler integrator's semantics, with one deliberate softening:
+- k81 decays at rate λ in all cells. For clean-ice cells the decay is
+  multiplied by a smooth weight `0.5 * (1 - tanh((t - t_old) / τ_smooth))`
+  that transitions from 1 to 0 around `t = t_old`. This replaces the Euler
+  code's hard `if t > t_old` step — the step was causing Tsit5 to do many
+  rejected/refined sub-steps every time the integrator crossed `t_old`,
+  which dominated the AD cost under NUTS. `τ_smooth = 5 kyr` ≪ 229 kyr
+  (the ⁸¹Kr decay half-life) so the smoothing changes integrated decay by
+  a negligible fraction.
 - Mixing flux is centred-difference between adjacent cells; clean-ice cells
   receive no mixing flux (their endpoint contributions are skipped).
 - ⁴⁰Ar receives a bottom-source flux `F_ar40 / thickness[end]` in the
@@ -564,14 +570,17 @@ function basal_mixing_rhs!(du, u, p, t)
     thickness  = p.thickness
     mixing_rate = p.mixing_rate
     clean_mask  = p.idx_clean_mask
+    τ_smooth    = p.τ_smooth
     Tz = eltype(du)
     zero_T = zero(Tz)
 
-    # k81 decay (zeroed for clean ice past t_old). ar40 starts at zero.
-    decay_kills_clean = (t > t_old)
+    # Smooth decay-gate weight for clean ice. Continuous in (t - t_old) so
+    # Tsit5 doesn't trigger step rejection at the transition.
+    decay_weight = 0.5 * (1 - tanh((t - t_old) / τ_smooth))
+
     @inbounds for j in 1:N
-        if decay_kills_clean && clean_mask[j]
-            du_k81[j] = zero_T
+        if clean_mask[j]
+            du_k81[j] = -λ * c_k81[j] * decay_weight
         else
             du_k81[j] = -λ * c_k81[j]
         end
@@ -666,7 +675,8 @@ likelihood is driven to ~-Inf without throwing.
 function run_basal_mixing_ode(params, geom;
                               solver=Tsit5(),
                               reltol::Float64=1e-6,
-                              abstol::Float64=1e-8)
+                              abstol::Float64=1e-8,
+                              τ_smooth::Float64=5.0)
     delta    = params.delta
     m_clean  = params.m_clean
     f_dirty  = params.f_dirty
@@ -700,7 +710,8 @@ function run_basal_mixing_ode(params, geom;
     p_ode = (; N,
              k81_decay_constant = decay_constant(229.0),
              t_old, F_ar40,
-             thickness, mixing_rate, idx_clean_mask=clean_mask)
+             thickness, mixing_rate, idx_clean_mask=clean_mask,
+             τ_smooth)
 
     tspan = (zero(T), t_target)
     prob = ODEProblem{true}(basal_mixing_rhs!, u0, tspan, p_ode)
