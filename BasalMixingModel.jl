@@ -719,7 +719,12 @@ function run_basal_mixing_ode(params, geom;
     sol = solve(prob, solver;
                 reltol=reltol, abstol=abstol,
                 save_everystep=false, save_start=false,
-                saveat=[t_target])
+                saveat=[t_target],
+                # Default 1e6 was tripping when t_0 drifted toward the lower
+                # prior bound under :kr81 (weaker likelihood = more wandering).
+                # Failed solves return ok=false → NUTS rejects, but each costs
+                # 1e6 wasted Dual evals. 1e7 covers the worst expected case.
+                maxiters=10^7)
 
     if sol.retcode !== ReturnCode.Success
         return (fill(T(1e8), length(geom.k81_interp)),

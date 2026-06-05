@@ -336,14 +336,17 @@ function plot_derived_time_comparison(primary_path::AbstractString,
     return plot_derived_time(primary; secondary=secondary, kwargs...)
 end
 
-# Allow `julia plot_basalmixing_ensemble.jl path/to/chain.jld2`
+# Allow `julia plot_basalmixing_ensemble.jl [path]` for a single chain, OR
+# `julia plot_basalmixing_ensemble.jl primary secondary` for an overlay.
+# Including this file from the REPL never auto-plots — call plot_ensemble*
+# functions yourself.
 if abspath(PROGRAM_FILE) == @__FILE__
-    path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain-combined.jld2"
-    plot_ensemble(path)
+    if length(ARGS) >= 2
+        plot_ensemble_comparison(ARGS[1], ARGS[2])
+        plot_derived_time_comparison(ARGS[1], ARGS[2])
+    else
+        path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain-combined.jld2"
+        plot_ensemble(path)
+        plot_derived_time(load_ensemble_results(path))
+    end
 end
-
-## Default interactive entry point: overlay kr81-only on combined.
-plot_ensemble_comparison("results/emcee-chain-combined.jld2",
-                         "results/emcee-chain-kr81.jld2")
-plot_derived_time_comparison("results/emcee-chain-combined.jld2",
-                             "results/emcee-chain-kr81.jld2")
