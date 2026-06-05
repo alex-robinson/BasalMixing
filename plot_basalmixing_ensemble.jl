@@ -54,6 +54,113 @@ function logp_mask(df, logp_window::Float64)
 end
 
 """
+    compute_posterior_trajectories(chain, k81_obs, dar40_obs, depth; n_thin=300)
+        -> NamedTuple
+
+For up to `n_thin` stride-thinned posterior samples, re-run the forward
+model with that sample's parameters integrated `0 → |t_0|`, then return
+per-panel quantile bands (lo=2.5%, med=50%, hi=97.5%) on the following
+common grids:
+
+- `mixing_rate`: bands over depth (Float64 N_depth).
+- `age_profile`: k81 closed-system age at end-of-integration ("inference
+  time") per depth.
+- `dar40_profile`: δ⁴⁰Ar at inference time per depth.
+- `age_ts`: k81 age at each obs depth per signed-BP time. Aggregation grid
+  `x_grid = -3000:1:0` kyr. A sample contributes to bin `x` only if its
+  integration covers it (i.e. `|t_0_sample| ≥ |x|`); bins with no
+  contributing samples report NaN.
+
+The MAP `b` from `map_best_run` is still plotted as a thin reference line;
+the posterior bands here are the rigorous "best fit ± uncertainty" display.
+"""
+function compute_posterior_trajectories(chain, k81_obs, dar40_obs, depth;
+                                        n_thin::Int=300)
+    df = DataFrame(chain)
+    n_total = nrow(df)
+    idx = unique(round.(Int, range(1, n_total; length=min(n_thin, n_total))))
+    n = length(idx)
+
+    N_depth   = length(depth)
+    n_obs_k81 = nrow(k81_obs)
+    x_grid    = collect(-3000.0:1.0:0.0)
+    n_x       = length(x_grid)
+
+    mixing_rates   = zeros(n, N_depth)
+    age_profiles   = fill(NaN, n, N_depth)
+    dar40_profiles = fill(NaN, n, N_depth)
+    age_ts         = fill(NaN, n, n_obs_k81, n_x)
+
+    bs = [BasalMixingModel(depth=depth,
+                           k81_obs_depths=k81_obs.depth,
+                           dar40_obs_depths=dar40_obs.depth)
+          for _ in 1:Threads.maxthreadid()]
+
+    Threads.@threads for j in 1:n
+        b = bs[Threads.threadid()]
+        i = idx[j]
+        p_s = (
+            delta   = df.delta[i],
+            m_clean = df.m_clean[i],
+            f_dirty = df.f_dirty[i],
+            t_old   = df.t_old[i],
+            F_ar40  = df.F_ar40[i],
+        )
+        t_target = -df.t_0[i]
+        ok = RunBasalMixingModel!(p_s, b, (k81_obs, dar40_obs); dt=0.1, t1=t_target)
+        if !ok
+            continue
+        end
+        mixing_rates[j, :]   .= b.mixing_rate
+        age_profiles[j, :]   .= b.state.age_k81
+        dar40_profiles[j, :] .= b.state.dar40
+
+        # Project the obs-depth time series onto the common signed-BP grid.
+        k_last = searchsortedlast(b.k81.time, t_target)
+        @inbounds for k in 1:k_last
+            t_elapsed = b.k81.time[k]
+            x = t_elapsed - t_target   # ≤ 0, kyr BP
+            ix = clamp(round(Int, x - x_grid[1]) + 1, 1, n_x)
+            for i_obs in 1:n_obs_k81
+                age_ts[j, i_obs, ix] = b.k81.dat[i_obs, k]
+            end
+        end
+    end
+
+    # Per-column quantile bands.
+    function bands(arr2d; qlo=0.025, qmed=0.5, qhi=0.975)
+        _, m = size(arr2d)
+        lo  = Vector{Float64}(undef, m)
+        med = Vector{Float64}(undef, m)
+        hi  = Vector{Float64}(undef, m)
+        @inbounds for j in 1:m
+            col = filter(!isnan, view(arr2d, :, j))
+            if isempty(col)
+                lo[j] = NaN; med[j] = NaN; hi[j] = NaN
+            else
+                qs = quantile(col, [qlo, qmed, qhi])
+                lo[j] = qs[1]; med[j] = qs[2]; hi[j] = qs[3]
+            end
+        end
+        return (; lo, med, hi)
+    end
+
+    mixing_rate_q = bands(mixing_rates)
+    age_profile_q = bands(age_profiles)
+    dar40_profile_q = bands(dar40_profiles)
+
+    # Time series: bands per (i_obs, x).
+    age_ts_q = [bands(@view age_ts[:, i_obs, :]) for i_obs in 1:n_obs_k81]
+
+    return (; mixing_rate=mixing_rate_q,
+              age_profile=age_profile_q,
+              dar40_profile=dar40_profile_q,
+              age_ts=age_ts_q,
+              x_grid,
+              n_used=n)
+end
+
+"""
     map_best_run(chain, k81, dar40, depth) -> (b, t_elapsed_map, p_best, df, best_idx)
 
 Re-run the forward model at the chain's MAP parameters. The sampled-time model
@@ -127,12 +234,18 @@ function plot_ensemble(;
     secondary_label = secondary === nothing ? nothing :
                       "secondary (:$(get(secondary, :likelihood, :unknown)))"
 
+    ## Posterior trajectory bands (primary chain only; overlay stays MAP-only) ##
+    println("Computing primary posterior trajectories (n_thin=300)…")
+    posterior = compute_posterior_trajectories(chain, k81, dar40, depth; n_thin=300)
+    println("  used $(posterior.n_used) samples")
+
     ## Best-fit depth profiles ##
     overlay = sec === nothing ? nothing : (; b=sec.b, t_max=sec.t_elapsed_map, label=secondary_label)
     fig_best = plot_BasalMixingModelRun(primary.b;
                                         k81_obs=k81, dar40_obs=dar40,
                                         t_max=primary.t_elapsed_map,
-                                        overlay=overlay)
+                                        overlay=overlay,
+                                        posterior=posterior)
 
     ## log-posterior scatter ##
     fig_logp = Figure(size=(900, 700))

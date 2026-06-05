@@ -906,7 +906,8 @@ function add_clean_dirty_boundary!(ax,x, y; with_label=true)
     return
 end
 """
-    plot_BasalMixingModelRun(b; k81_obs, dar40_obs, t_max=nothing, overlay=nothing)
+    plot_BasalMixingModelRun(b; k81_obs, dar40_obs, t_max=nothing,
+                                overlay=nothing, posterior=nothing)
 
 Render the standard four-panel figure for a single forward run `b`.
 
@@ -918,8 +919,14 @@ uninitialised buffer tails as a misleading zero trajectory.
 whose best-fit age and δ⁴⁰Ar are drawn on top of the primary in a distinct
 dashed style, so the secondary chain (e.g. kr81-only) can be compared
 visually to the primary (combined).
+
+`posterior`, if given, is a NamedTuple from `compute_posterior_trajectories`
+containing (lo, med, hi) quantile bands for the mixing-rate / age /
+δ⁴⁰Ar depth profiles and the obs-depth age time series. When provided,
+each panel gets a 95% credible band (light fill) and a posterior median
+line (solid colored), with the MAP line demoted to a thin dashed reference.
 """
-function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing,overlay=nothing)
+function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing,overlay=nothing,posterior=nothing)
 
     states = b.states
     k81 = b.k81
@@ -952,7 +959,22 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
 
     jj = findall(b.depth .>= b.depth_lim)
-    scatter!(ax0,b.mixing_rate[jj],-b.depth[jj];color=:black,markersize=5)
+
+    if posterior !== nothing
+        # 95% CI band + median (panel 0: mixing rate vs depth).
+        q = posterior.mixing_rate
+        ok_mask = .!isnan.(q.med[jj])
+        band!(ax0, -b.depth[jj][ok_mask], q.lo[jj][ok_mask], q.hi[jj][ok_mask];
+              color=(:steelblue, 0.3), direction=:y)
+        lines!(ax0, q.med[jj][ok_mask], -b.depth[jj][ok_mask];
+               color=:steelblue, linewidth=2)
+        # MAP demoted to thin dashed reference
+        scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
+                 color=:black, markersize=3)
+    else
+        scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
+                 color=:black, markersize=5)
+    end
 
     if overlay !== nothing
         b2 = overlay.b
@@ -977,8 +999,22 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
             lines!(ax1,states.age_k81[:,k],-b.depth,color=:grey50,linewidth=1.5)
         end
     end
-    k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
-    lines!(ax1,states.age_k81[:,k],-b.depth,color=:black,linewidth=2)
+
+    if posterior !== nothing
+        q = posterior.age_profile
+        ok_mask = .!isnan.(q.med)
+        band!(ax1, -b.depth[ok_mask], q.lo[ok_mask], q.hi[ok_mask];
+              color=(:steelblue, 0.3), direction=:y)
+        lines!(ax1, q.med[ok_mask], -b.depth[ok_mask];
+               color=:steelblue, linewidth=2)
+        # MAP demoted to thin dashed reference
+        k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
+        lines!(ax1, states.age_k81[:,k], -b.depth;
+               color=:black, linewidth=1, linestyle=:dash)
+    else
+        k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
+        lines!(ax1, states.age_k81[:,k], -b.depth; color=:black, linewidth=2)
+    end
 
     if overlay !== nothing
         b2 = overlay.b
@@ -1006,8 +1042,21 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
                 lines!(ax3,states.dar40[:,k],-b.depth,color=:grey50,linewidth=1.5)
             end
         end
-        k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
-        lines!(ax3,states.dar40[:,k],-b.depth,color=:black,linewidth=2.5)
+
+        if posterior !== nothing
+            q = posterior.dar40_profile
+            ok_mask = .!isnan.(q.med)
+            band!(ax3, -b.depth[ok_mask], q.lo[ok_mask], q.hi[ok_mask];
+                  color=(col_dar40, 0.3), direction=:y)
+            lines!(ax3, q.med[ok_mask], -b.depth[ok_mask];
+                   color=col_dar40, linewidth=2)
+            k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
+            lines!(ax3, states.dar40[:,k], -b.depth;
+                   color=:black, linewidth=1, linestyle=:dash)
+        else
+            k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
+            lines!(ax3, states.dar40[:,k], -b.depth; color=:black, linewidth=2.5)
+        end
 
         if overlay !== nothing
             b2 = overlay.b
@@ -1031,8 +1080,25 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     ax2.xticks = -3000:1000:0
     ax2.yticks = 0:100:900
 
-    for (j,d) in enumerate(k81.depth)
-        lines!(ax2,k81.time[1:k_last_pred] .- t_max_val,k81.dat[j,1:k_last_pred],color=col_k81[j],linewidth=2)
+    if posterior !== nothing
+        # Bands per obs-depth in signed-BP coordinates.
+        for (j, d) in enumerate(k81.depth)
+            q = posterior.age_ts[j]
+            xg = posterior.x_grid
+            ok_mask = .!isnan.(q.med)
+            band!(ax2, xg[ok_mask], q.lo[ok_mask], q.hi[ok_mask];
+                  color=(col_k81[j], 0.25))
+            lines!(ax2, xg[ok_mask], q.med[ok_mask];
+                   color=col_k81[j], linewidth=2)
+            # MAP demoted to thin dashed reference
+            lines!(ax2, k81.time[1:k_last_pred] .- t_max_val, k81.dat[j,1:k_last_pred];
+                   color=col_k81[j], linewidth=1, linestyle=:dash)
+        end
+    else
+        for (j,d) in enumerate(k81.depth)
+            lines!(ax2,k81.time[1:k_last_pred] .- t_max_val,k81.dat[j,1:k_last_pred],
+                   color=col_k81[j],linewidth=2)
+        end
     end
 
     if overlay !== nothing
