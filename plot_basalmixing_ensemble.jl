@@ -75,7 +75,7 @@ The MAP `b` from `map_best_run` is still plotted as a thin reference line;
 the posterior bands here are the rigorous "best fit ± uncertainty" display.
 """
 function compute_posterior_trajectories(chain, k81_obs, dar40_obs, depth;
-                                        n_thin::Int=300)
+                                        n_thin::Int=300, n_spaghetti::Int=50)
     df = DataFrame(chain)
     n_total = nrow(df)
     idx = unique(round.(Int, range(1, n_total; length=min(n_thin, n_total))))
@@ -149,13 +149,20 @@ function compute_posterior_trajectories(chain, k81_obs, dar40_obs, depth;
     age_profile_q = bands(age_profiles)
     dar40_profile_q = bands(dar40_profiles)
 
-    # Time series: bands per (i_obs, x).
+    # Time series: median+CI aggregation on the fixed BP grid has a coverage
+    # artefact — at very negative BP only a fraction of samples contribute,
+    # and the median jumps discontinuously when boundary samples enter/leave
+    # the subset. We keep the band stats for completeness, but the panel-4
+    # plotter uses the raw spaghetti subset instead.
     age_ts_q = [bands(@view age_ts[:, i_obs, :]) for i_obs in 1:n_obs_k81]
+    spag_idx = unique(round.(Int, range(1, n; length=min(n_spaghetti, n))))
+    spaghetti_age_ts = age_ts[spag_idx, :, :]
 
     return (; mixing_rate=mixing_rate_q,
               age_profile=age_profile_q,
               dar40_profile=dar40_profile_q,
               age_ts=age_ts_q,
+              spaghetti_age_ts,
               x_grid,
               n_used=n)
 end
@@ -234,13 +241,24 @@ function plot_ensemble(;
     secondary_label = secondary === nothing ? nothing :
                       "secondary (:$(get(secondary, :likelihood, :unknown)))"
 
-    ## Posterior trajectory bands (primary chain only; overlay stays MAP-only) ##
+    ## Posterior trajectory bands (primary + secondary if present) ##
     println("Computing primary posterior trajectories (n_thin=300)…")
     posterior = compute_posterior_trajectories(chain, k81, dar40, depth; n_thin=300)
     println("  used $(posterior.n_used) samples")
 
+    posterior_sec = nothing
+    if sec !== nothing
+        println("Computing secondary posterior trajectories (n_thin=300)…")
+        posterior_sec = compute_posterior_trajectories(secondary.chain,
+                                                      secondary.k81, secondary.dar40, secondary.depth;
+                                                      n_thin=300)
+        println("  used $(posterior_sec.n_used) samples")
+    end
+
     ## Best-fit depth profiles ##
-    overlay = sec === nothing ? nothing : (; b=sec.b, t_max=sec.t_elapsed_map, label=secondary_label)
+    overlay = sec === nothing ? nothing :
+              (; b=sec.b, t_max=sec.t_elapsed_map, label=secondary_label,
+                 posterior=posterior_sec)
     fig_best = plot_BasalMixingModelRun(primary.b;
                                         k81_obs=k81, dar40_obs=dar40,
                                         t_max=primary.t_elapsed_map,

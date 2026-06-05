@@ -979,8 +979,17 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     if overlay !== nothing
         b2 = overlay.b
         jj2 = findall(b2.depth .>= b2.depth_lim)
-        lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
-               color=col_overlay, linewidth=1.5, linestyle=:dash)
+        if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
+            q2 = overlay.posterior.mixing_rate
+            ok2 = .!isnan.(q2.med[jj2])
+            band!(ax0, -b2.depth[jj2][ok2], q2.lo[jj2][ok2], q2.hi[jj2][ok2];
+                  color=(:black, 0.12), direction=:y)
+            lines!(ax0, q2.med[jj2][ok2], -b2.depth[jj2][ok2];
+                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+        else
+            lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
+                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+        end
     end
 
     ## PANEL 1: Depth versus closed-system age
@@ -1021,8 +1030,17 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
         k_last_state2 = searchsortedlast(b2.states.time, t2)
         k2 = argmin(abs.(b2.states.time[1:k_last_state2] .- b2.joint.time_min))
-        lines!(ax1, b2.states.age_k81[:,k2], -b2.depth;
-               color=col_overlay, linewidth=2, linestyle=:dash)
+        if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
+            q2 = overlay.posterior.age_profile
+            ok2 = .!isnan.(q2.med)
+            band!(ax1, -b2.depth[ok2], q2.lo[ok2], q2.hi[ok2];
+                  color=(:black, 0.12), direction=:y)
+            lines!(ax1, q2.med[ok2], -b2.depth[ok2];
+                   color=col_overlay, linewidth=2, linestyle=:dash)
+        else
+            lines!(ax1, b2.states.age_k81[:,k2], -b2.depth;
+                   color=col_overlay, linewidth=2, linestyle=:dash)
+        end
     end
 
     errorbars!(ax1, k81_obs.age, -k81_obs.depth, k81_obs.age_hi, k81_obs.age_lo, color=col_k81, direction=:x, whiskerwidth=8)
@@ -1063,8 +1081,17 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
             t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
             k_last_state2 = searchsortedlast(b2.states.time, t2)
             k2 = argmin(abs.(b2.states.time[1:k_last_state2] .- b2.joint.time_min))
-            lines!(ax3, b2.states.dar40[:,k2], -b2.depth;
-                   color=col_overlay, linewidth=2, linestyle=:dash)
+            if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
+                q2 = overlay.posterior.dar40_profile
+                ok2 = .!isnan.(q2.med)
+                band!(ax3, -b2.depth[ok2], q2.lo[ok2], q2.hi[ok2];
+                      color=(:black, 0.12), direction=:y)
+                lines!(ax3, q2.med[ok2], -b2.depth[ok2];
+                       color=col_overlay, linewidth=2, linestyle=:dash)
+            else
+                lines!(ax3, b2.states.dar40[:,k2], -b2.depth;
+                       color=col_overlay, linewidth=2, linestyle=:dash)
+            end
         end
 
         errorbars!(ax3, dar40_obs[!,:dar40],-dar40_obs[!,"depth"], dar40_obs[!,:dar40_err], dar40_obs[!,:dar40_err], color=col_dar40, direction=:x, whiskerwidth=8)
@@ -1081,18 +1108,24 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     ax2.yticks = 0:100:900
 
     if posterior !== nothing
-        # Bands per obs-depth in signed-BP coordinates.
+        # Spaghetti per obs-depth: each sample's full trajectory in signed-BP
+        # coordinates, drawn at low alpha. Density encodes posterior weight;
+        # no aggregation artefact (avoids the "median jumps" you get when the
+        # contributing-sample subset changes along x).
+        spag = posterior.spaghetti_age_ts   # [n_spag, n_obs, n_x]
+        xg   = posterior.x_grid
+        n_spag = size(spag, 1)
+        α_spag = clamp(2.5 / sqrt(n_spag), 0.04, 0.25)
         for (j, d) in enumerate(k81.depth)
-            q = posterior.age_ts[j]
-            xg = posterior.x_grid
-            ok_mask = .!isnan.(q.med)
-            band!(ax2, xg[ok_mask], q.lo[ok_mask], q.hi[ok_mask];
-                  color=(col_k81[j], 0.25))
-            lines!(ax2, xg[ok_mask], q.med[ok_mask];
-                   color=col_k81[j], linewidth=2)
-            # MAP demoted to thin dashed reference
+            for s in 1:n_spag
+                traj = view(spag, s, j, :)
+                ok_mask = .!isnan.(traj)
+                lines!(ax2, xg[ok_mask], traj[ok_mask];
+                       color=(col_k81[j], α_spag), linewidth=0.7)
+            end
+            # MAP as solid colored reference on top
             lines!(ax2, k81.time[1:k_last_pred] .- t_max_val, k81.dat[j,1:k_last_pred];
-                   color=col_k81[j], linewidth=1, linestyle=:dash)
+                   color=col_k81[j], linewidth=2)
         end
     else
         for (j,d) in enumerate(k81.depth)
@@ -1105,9 +1138,27 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         b2 = overlay.b
         t2 = overlay.t_max === nothing ? Float64(b2.k81.time[end]) : Float64(overlay.t_max)
         k_last_pred2 = searchsortedlast(b2.k81.time, t2)
-        for (j,d) in enumerate(b2.k81.depth)
-            lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
-                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+        if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
+            # Spaghetti for the secondary chain too, in black at low alpha.
+            spag2 = overlay.posterior.spaghetti_age_ts
+            xg2   = overlay.posterior.x_grid
+            n_s2  = size(spag2, 1)
+            α2    = clamp(2.0 / sqrt(n_s2), 0.03, 0.20)
+            for j in 1:size(spag2, 2), s in 1:n_s2
+                traj = view(spag2, s, j, :)
+                ok2  = .!isnan.(traj)
+                lines!(ax2, xg2[ok2], traj[ok2];
+                       color=(:black, α2), linewidth=0.5)
+            end
+            for (j,d) in enumerate(b2.k81.depth)
+                lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
+                       color=col_overlay, linewidth=1.5, linestyle=:dash)
+            end
+        else
+            for (j,d) in enumerate(b2.k81.depth)
+                lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
+                       color=col_overlay, linewidth=1.5, linestyle=:dash)
+            end
         end
     end
 
