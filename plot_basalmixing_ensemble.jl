@@ -379,17 +379,14 @@ function plot_ensemble(;
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        # Strip "-dx<step>" from the setup string in the filename: it's a
-        # discretisation detail, not a content descriptor.
-        setup_clean = replace(setup, r"-dx[\d.]+" => "")
-        suffix = isempty(setup_clean) ? "" : "_$setup_clean"
-        # Use the same isotope notation as the legend (ASCII version).
-        tag = secondary === nothing ? lik_filename_tag(likelihood) :
-              "$(lik_filename_tag(likelihood))-vs-$(lik_filename_tag(get(secondary, :likelihood, :secondary)))"
-        ar40_tag = show_ar40 ? "" : "_no-ar40"
-        mysave(prefix*"ens-best-$tag$ar40_tag$suffix.png", fig_best)
-        mysave(prefix*"ens-logp-$tag$ar40_tag$suffix.png", fig_logp)
-        mysave(prefix*"ens-hist-$tag$ar40_tag$suffix.png", fig_hist)
+        # Simple convention: tag = "81Kr+40Ar" when ⁴⁰Ar content is in the
+        # figure, "81Kr" when only ⁸¹Kr panels are kept. The secondary-chain
+        # comparison and setup name are implicit (always shown when both
+        # chains are loaded, always one mesh discretisation per project).
+        tag = show_ar40 ? "81Kr+40Ar" : "81Kr"
+        mysave(prefix*"ens-best-$tag.png", fig_best)
+        mysave(prefix*"ens-logp-$tag.png", fig_logp)
+        mysave(prefix*"ens-hist-$tag.png", fig_hist)
     end
 
     return (best=fig_best, logp=fig_logp, hist=fig_hist)
@@ -506,18 +503,17 @@ function plot_derived_time(results::NamedTuple;
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        # Match the file-naming conventions used in plot_ensemble.
-        setup_clean = replace(setup, r"-dx[\d.]+" => "")
-        suffix = isempty(setup_clean) ? "" : "_$setup_clean"
+        # Match plot_ensemble's tag convention. derived-time always shows
+        # the t_0 posterior; if combined and kr81 are both available the
+        # figure compares them, otherwise only the primary's t_0 is shown.
         function _ltag(lik::Symbol)
             lik === :combined && return "81Kr+40Ar"
             lik === :kr81     && return "81Kr"
             lik === :ar40     && return "40Ar"
             return string(lik)
         end
-        tag = secondary === nothing ? _ltag(likelihood) :
-              "$(_ltag(likelihood))-vs-$(_ltag(get(secondary, :likelihood, :secondary)))"
-        mysave(prefix*"derived-time-pred-$tag$suffix.png", fig)
+        tag = secondary === nothing ? _ltag(likelihood) : "81Kr+40Ar"
+        mysave(prefix*"derived-time-pred-$tag.png", fig)
     end
     return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, map_t=d.map_t)
 end
