@@ -940,10 +940,11 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     col_k81 = ["#487E3D","#8080F7","teal"]
     col_k81_transparent = [(c, 0.2) for c in col_k81]
     col_dar40 = "#BC401E"
-    # Muted purple for the secondary chain — visually subordinate to the
-    # primary's saturated colours so the comparison reads "primary is the
-    # foreground". Solid lines (not dashed) and slightly thinner.
-    col_overlay = "#9370DB"   # mediumpurple
+    # Muted dark magenta/wine for the secondary chain — visually subordinate
+    # to the primary's saturated colours. Distinct hue family from the
+    # primary's blue-violet middle-depth k81 colour ("#8080F7"), and from
+    # the dar40 orange-red, green, and teal in use.
+    col_overlay = "#993366"
 
     if !isnothing(dar40_obs)
         fig = Figure(size=(1000,600))

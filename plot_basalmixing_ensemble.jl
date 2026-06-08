@@ -299,7 +299,7 @@ function plot_ensemble(;
             (sec === nothing ? "" : "; secondary kept $n_kept_s/$(nrow(sec.df))"))
 
     fig_hist = Figure(size=(900, 700))
-    col_overlay_hist = "#9370DB"   # mediumpurple — matches col_overlay in plot_BasalMixingModelRun
+    col_overlay_hist = "#993366"   # dark magenta — matches col_overlay in plot_BasalMixingModelRun
     ipar = 0
     for (param, label) in zip(params, labels)
         string(param) in names(primary.df) || continue
@@ -334,9 +334,11 @@ function plot_ensemble(;
                              label="Prior", linewidth=2, color=:grey50)
         end
 
-        # MAP — thin vlines, less prominent than the median lines.
+        # MAP — same dark blue as the median line but thinner, so it reads as
+        # "same chain, secondary summary" rather than competing with the
+        # median for attention.
         vlines!(ax, [primary.df[primary.best_idx, param]];
-                color=:red, linewidth=1, label="MAP")
+                color=:steelblue, linewidth=1.2, label="MAP")
     end
 
     if save_figures
