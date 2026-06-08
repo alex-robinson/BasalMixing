@@ -252,6 +252,14 @@ function plot_ensemble(;
         lik === :ar40     && return L"^{40}Ar"
         return LaTeXString(string(lik))
     end
+    # ASCII-clean version for filenames — same isotope tag as the legend
+    # without the LaTeX braces and superscript markers.
+    function lik_filename_tag(lik::Symbol)
+        lik === :combined && return "81Kr+40Ar"
+        lik === :kr81     && return "81Kr"
+        lik === :ar40     && return "40Ar"
+        return string(lik)
+    end
     primary_label   = lik_latex(likelihood)
     secondary_label = secondary === nothing ? nothing :
                       lik_latex(get(secondary, :likelihood, :unknown))
@@ -371,13 +379,17 @@ function plot_ensemble(;
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        suffix = isempty(setup) ? "" : "_$setup"
-        tag    = secondary === nothing ? "$(likelihood)" :
-                 "$(likelihood)-vs-$(get(secondary, :likelihood, :secondary))"
+        # Strip "-dx<step>" from the setup string in the filename: it's a
+        # discretisation detail, not a content descriptor.
+        setup_clean = replace(setup, r"-dx[\d.]+" => "")
+        suffix = isempty(setup_clean) ? "" : "_$setup_clean"
+        # Use the same isotope notation as the legend (ASCII version).
+        tag = secondary === nothing ? lik_filename_tag(likelihood) :
+              "$(lik_filename_tag(likelihood))-vs-$(lik_filename_tag(get(secondary, :likelihood, :secondary)))"
         ar40_tag = show_ar40 ? "" : "_no-ar40"
-        mysave(prefix*"mixingmodel-ens-best-$tag$ar40_tag$suffix.png", fig_best)
-        mysave(prefix*"mixingmodel-ens-logp-$tag$ar40_tag$suffix.png", fig_logp)
-        mysave(prefix*"mixingmodel-ens-hist-$tag$ar40_tag$suffix.png", fig_hist)
+        mysave(prefix*"ens-best-$tag$ar40_tag$suffix.png", fig_best)
+        mysave(prefix*"ens-logp-$tag$ar40_tag$suffix.png", fig_logp)
+        mysave(prefix*"ens-hist-$tag$ar40_tag$suffix.png", fig_hist)
     end
 
     return (best=fig_best, logp=fig_logp, hist=fig_hist)
@@ -494,9 +506,17 @@ function plot_derived_time(results::NamedTuple;
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        suffix = isempty(setup) ? "" : "_$setup"
-        tag    = secondary === nothing ? "$(likelihood)" :
-                 "$(likelihood)-vs-$(get(secondary, :likelihood, :secondary))"
+        # Match the file-naming conventions used in plot_ensemble.
+        setup_clean = replace(setup, r"-dx[\d.]+" => "")
+        suffix = isempty(setup_clean) ? "" : "_$setup_clean"
+        function _ltag(lik::Symbol)
+            lik === :combined && return "81Kr+40Ar"
+            lik === :kr81     && return "81Kr"
+            lik === :ar40     && return "40Ar"
+            return string(lik)
+        end
+        tag = secondary === nothing ? _ltag(likelihood) :
+              "$(_ltag(likelihood))-vs-$(_ltag(get(secondary, :likelihood, :secondary)))"
         mysave(prefix*"derived-time-pred-$tag$suffix.png", fig)
     end
     return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, map_t=d.map_t)
