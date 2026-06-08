@@ -906,6 +906,61 @@ function add_clean_dirty_boundary!(ax,x, y; with_label=true)
     return
 end
 """
+    draw_schematic_panel!(fig, col, b)
+
+Draw the basal-mixing model schematic into `fig[1, col]`: a vertical column
+showing clean ice (white, 0–250 kyr) above `depth_lim`, silty ice (tan)
+below, with horizontal layer interfaces and double-headed ↕ arrows on each
+to indicate diffusive mixing between adjacent cells. Used as panel 0 in
+the best-fit figure when `show_mixing=false`, so the figure still has a
+"what does the model look like" panel.
+
+Y-axis matches the other depth panels (3036–3053 m); x-axis is hidden.
+"""
+function draw_schematic_panel!(fig, col::Int, b)
+    depth_lim     = b.depth_lim
+    depth_bedrock = b.depth_bedrock
+    silty_color = "#C8A878"
+
+    ax = Axis(fig[1, col];
+              limits=((-0.4, 1.2), (-(depth_bedrock + 0.5), -3035)),
+              ylabel="Depth (m)",
+              ygridvisible=false, xgridvisible=false)
+    colsize!(fig.layout, col, Auto(0.6))
+    d = collect(-3052:2:-3036)
+    ax.yticks = (d, string.(abs.(d)))
+    hidexdecorations!(ax)
+
+    # Clean ice box (white, above depth_lim).
+    poly!(ax, Rect2f(0, -depth_lim, 1, depth_lim - 3035);
+          color=:white, strokecolor=:black, strokewidth=1)
+    # Silty ice box (tan, below depth_lim down to bedrock).
+    poly!(ax, Rect2f(0, -depth_bedrock, 1, depth_bedrock - depth_lim);
+          color=silty_color, strokecolor=:black, strokewidth=1)
+
+    # Horizontal interfaces in the silty zone.
+    layer_depths = collect((depth_lim + 1.0):1.0:(depth_bedrock - 0.3))
+    for dd in layer_depths
+        lines!(ax, [0, 1], [-dd, -dd]; color=:grey50, linewidth=1)
+    end
+    # Double-headed mixing arrows centred on each interface.
+    for dd in layer_depths
+        text!(ax, 0.5, -dd; text="↕", align=(:center, :center),
+              fontsize=18, color=:black)
+    end
+
+    # Labels.
+    text!(ax, 0.5, -(depth_lim - 2.0); text="CLEAN ICE 0-250 kyr",
+          align=(:center, :center), fontsize=9)
+    text!(ax, -0.25, -(depth_lim + depth_bedrock) / 2; text="SILTY ICE",
+          align=(:center, :center), fontsize=12, rotation=π/2)
+    text!(ax, 0.5, -depth_bedrock - 0.25; text="BEDROCK",
+          align=(:center, :top), fontsize=10)
+
+    return ax
+end
+
+"""
     plot_BasalMixingModelRun(b; k81_obs, dar40_obs, t_max=nothing,
                                 overlay=nothing, posterior=nothing,
                                 show_mixing=true, show_grid_lines=false)
@@ -950,11 +1005,16 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     # the dar40 orange-red, green, and teal in use.
     col_overlay = "#993366"
 
-    # Width per panel ~250 px. Panel count = mixing? + k81-age + dar40? + time-series.
-    n_panels = (show_mixing ? 1 : 0) + 1 + (!isnothing(dar40_obs) ? 1 : 0) + 1
+    # Width per panel ~250 px. Panel 0 is always present (either mixing
+    # rate or schematic), k81-age always present, dar40 optional, time
+    # series always present.
+    n_panels = 1 + 1 + (!isnothing(dar40_obs) ? 1 : 0) + 1
     fig = Figure(size=(max(250 * n_panels, 500), 600))
 
-    ## PANEL 0: mixing rate versus depth (optional)
+    ## PANEL 0: mixing rate (show_mixing=true) OR model schematic (show_mixing=false)
+    if !show_mixing
+        draw_schematic_panel!(fig, 1, b)
+    end
     if show_mixing
         ax0 = Axis(fig[1,1], limits=((-0.05,0.25),(-3053,-3035)), xlabel="Mixing rate (m/yr)", ylabel="Depth (m)", ygridvisible = false )
         colsize!(fig.layout, 1, Auto(0.6))
