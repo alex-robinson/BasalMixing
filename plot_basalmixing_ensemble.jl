@@ -227,12 +227,19 @@ function plot_ensemble(;
     likelihood::Symbol=:combined,
     secondary=nothing,
     logp_window::Float64=10.0,
+    show_ar40::Bool=true,
     outdir::AbstractString="plots",
     save_figures::Bool=true,
 )
     params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
     labels = ["delta (m)", "m_clean (m/yr)", "f_dirty",
               "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "t_0 (kyr)"]
+    if !show_ar40
+        # Drop the ⁴⁰Ar-only parameter (F_ar40) from the parameter scans.
+        keep = findall(p -> p !== :F_ar40, params)
+        params = params[keep]
+        labels = labels[keep]
+    end
 
     primary = map_best_run(chain, k81, dar40, depth)
     sec     = secondary === nothing ? nothing :
@@ -256,7 +263,8 @@ function plot_ensemble(;
 
     ## Best-fit depth profiles — primary only ##
     fig_best = plot_BasalMixingModelRun(primary.b;
-                                        k81_obs=k81, dar40_obs=dar40,
+                                        k81_obs=k81,
+                                        dar40_obs=(show_ar40 ? dar40 : nothing),
                                         t_max=primary.t_elapsed_map,
                                         overlay=nothing,
                                         posterior=posterior)
@@ -366,9 +374,10 @@ function plot_ensemble(;
         suffix = isempty(setup) ? "" : "_$setup"
         tag    = secondary === nothing ? "$(likelihood)" :
                  "$(likelihood)-vs-$(get(secondary, :likelihood, :secondary))"
-        mysave(prefix*"mixingmodel-ens-best-$tag$suffix.png", fig_best)
-        mysave(prefix*"mixingmodel-ens-logp-$tag$suffix.png", fig_logp)
-        mysave(prefix*"mixingmodel-ens-hist-$tag$suffix.png", fig_hist)
+        ar40_tag = show_ar40 ? "" : "_no-ar40"
+        mysave(prefix*"mixingmodel-ens-best-$tag$ar40_tag$suffix.png", fig_best)
+        mysave(prefix*"mixingmodel-ens-logp-$tag$ar40_tag$suffix.png", fig_logp)
+        mysave(prefix*"mixingmodel-ens-hist-$tag$ar40_tag$suffix.png", fig_hist)
     end
 
     return (best=fig_best, logp=fig_logp, hist=fig_hist)
@@ -512,11 +521,14 @@ end
 # functions yourself.
 if abspath(PROGRAM_FILE) == @__FILE__
     if length(ARGS) >= 2
+        # Both variants: with and without ⁴⁰Ar.
         plot_ensemble_comparison(ARGS[1], ARGS[2])
+        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false)
         plot_derived_time_comparison(ARGS[1], ARGS[2])
     else
         path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain-combined.jld2"
         plot_ensemble(path)
+        plot_ensemble(path; show_ar40=false)
         plot_derived_time(load_ensemble_results(path))
     end
 end
