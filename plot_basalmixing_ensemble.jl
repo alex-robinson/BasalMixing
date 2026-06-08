@@ -228,6 +228,8 @@ function plot_ensemble(;
     secondary=nothing,
     logp_window::Float64=10.0,
     show_ar40::Bool=true,
+    show_mixing::Bool=false,
+    show_grid_lines::Bool=false,
     outdir::AbstractString="plots",
     save_figures::Bool=true,
 )
@@ -275,7 +277,9 @@ function plot_ensemble(;
                                         dar40_obs=(show_ar40 ? dar40 : nothing),
                                         t_max=primary.t_elapsed_map,
                                         overlay=nothing,
-                                        posterior=posterior)
+                                        posterior=posterior,
+                                        show_mixing=show_mixing,
+                                        show_grid_lines=show_grid_lines)
 
     ## log-posterior scatter ##
     col_overlay_hist = "#993366"   # dark magenta — matches col_overlay in plot_BasalMixingModelRun
@@ -384,7 +388,10 @@ function plot_ensemble(;
         # comparison and setup name are implicit (always shown when both
         # chains are loaded, always one mesh discretisation per project).
         tag = show_ar40 ? "81Kr+40Ar" : "81Kr"
-        mysave(prefix*"ens-best-$tag.png", fig_best)
+        # Best-fit picks up a "-mixing" suffix when the mixing-rate panel
+        # is included; the default best plot leaves it out.
+        best_mix_tag = show_mixing ? "-mixing" : ""
+        mysave(prefix*"ens-best-$tag$best_mix_tag.png", fig_best)
         mysave(prefix*"ens-logp-$tag.png", fig_logp)
         mysave(prefix*"ens-hist-$tag.png", fig_hist)
     end
@@ -536,15 +543,22 @@ end
 # Including this file from the REPL never auto-plots — call plot_ensemble*
 # functions yourself.
 if abspath(PROGRAM_FILE) == @__FILE__
+    # Variants per run:
+    #   ⁴⁰Ar × mixing-panel → 4 "best" figures, 2 each for hist + logp,
+    #   1 derived-time. Re-saving hist/logp when only show_mixing flips
+    #   would just overwrite identical content, so we skip those calls.
     if length(ARGS) >= 2
-        # Both variants: with and without ⁴⁰Ar.
-        plot_ensemble_comparison(ARGS[1], ARGS[2])
-        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false)
+        plot_ensemble_comparison(ARGS[1], ARGS[2])                                          # 81Kr+40Ar, no mixing
+        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_mixing=true)                        # 81Kr+40Ar, +mixing
+        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false)                         # 81Kr, no mixing
+        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false, show_mixing=true)       # 81Kr, +mixing
         plot_derived_time_comparison(ARGS[1], ARGS[2])
     else
         path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain-combined.jld2"
         plot_ensemble(path)
+        plot_ensemble(path; show_mixing=true)
         plot_ensemble(path; show_ar40=false)
+        plot_ensemble(path; show_ar40=false, show_mixing=true)
         plot_derived_time(load_ensemble_results(path))
     end
 end

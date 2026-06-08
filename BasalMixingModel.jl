@@ -907,7 +907,8 @@ function add_clean_dirty_boundary!(ax,x, y; with_label=true)
 end
 """
     plot_BasalMixingModelRun(b; k81_obs, dar40_obs, t_max=nothing,
-                                overlay=nothing, posterior=nothing)
+                                overlay=nothing, posterior=nothing,
+                                show_mixing=true, show_grid_lines=false)
 
 Render the standard four-panel figure for a single forward run `b`.
 
@@ -926,7 +927,10 @@ containing (lo, med, hi) quantile bands for the mixing-rate / age /
 each panel gets a 95% credible band (light fill) and a posterior median
 line (solid colored), with the MAP line demoted to a thin dashed reference.
 """
-function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing,overlay=nothing,posterior=nothing)
+function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=nothing,
+                                   overlay=nothing,posterior=nothing,
+                                   show_mixing::Bool=true,
+                                   show_grid_lines::Bool=false)
 
     states = b.states
     k81 = b.k81
@@ -946,53 +950,55 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     # the dar40 orange-red, green, and teal in use.
     col_overlay = "#993366"
 
-    if !isnothing(dar40_obs)
-        fig = Figure(size=(1000,600))
-    else
-        fig = Figure(size=(700,600))
-    end
+    # Width per panel ~250 px. Panel count = mixing? + k81-age + dar40? + time-series.
+    n_panels = (show_mixing ? 1 : 0) + 1 + (!isnothing(dar40_obs) ? 1 : 0) + 1
+    fig = Figure(size=(max(250 * n_panels, 500), 600))
 
-    ## PANEL 0: mixing rate versus depth
-    ax0 = Axis(fig[1,1], limits=((-0.05,0.25),(-3053,-3035)), xlabel="Mixing rate (m/yr)", ylabel="Depth (m)", ygridvisible = false )
-    colsize!(fig.layout, 1, Auto(0.6))
-    d = collect(-3052:2:-3036)
-    ax0.yticks = (d,string.(abs.(d)))
-    ax0.xticks = [0.0,0.1,0.2]
+    ## PANEL 0: mixing rate versus depth (optional)
+    if show_mixing
+        ax0 = Axis(fig[1,1], limits=((-0.05,0.25),(-3053,-3035)), xlabel="Mixing rate (m/yr)", ylabel="Depth (m)", ygridvisible = false )
+        colsize!(fig.layout, 1, Auto(0.6))
+        d = collect(-3052:2:-3036)
+        ax0.yticks = (d,string.(abs.(d)))
+        ax0.xticks = [0.0,0.1,0.2]
 
-    add_clean_dirty_boundary!(ax0, 0.98, -b.depth_lim)
-    hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
+        add_clean_dirty_boundary!(ax0, 0.98, -b.depth_lim)
+        if show_grid_lines
+            hlines!(ax0,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
+        end
 
-    jj = findall(b.depth .>= b.depth_lim)
+        jj = findall(b.depth .>= b.depth_lim)
 
-    if posterior !== nothing
-        # 95% CI band + median (panel 0: mixing rate vs depth).
-        q = posterior.mixing_rate
-        ok_mask = .!isnan.(q.med[jj])
-        band!(ax0, -b.depth[jj][ok_mask], q.lo[jj][ok_mask], q.hi[jj][ok_mask];
-              color=(:steelblue, 0.3), direction=:y)
-        lines!(ax0, q.med[jj][ok_mask], -b.depth[jj][ok_mask];
-               color=:steelblue, linewidth=2)
-        # MAP demoted to thin dashed reference
-        scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
-                 color=:black, markersize=3)
-    else
-        scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
-                 color=:black, markersize=5)
-    end
-
-    if overlay !== nothing
-        b2 = overlay.b
-        jj2 = findall(b2.depth .>= b2.depth_lim)
-        if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
-            q2 = overlay.posterior.mixing_rate
-            ok2 = .!isnan.(q2.med[jj2])
-            band!(ax0, -b2.depth[jj2][ok2], q2.lo[jj2][ok2], q2.hi[jj2][ok2];
-                  color=(col_overlay, 0.18), direction=:y)
-            lines!(ax0, q2.med[jj2][ok2], -b2.depth[jj2][ok2];
-                   color=col_overlay, linewidth=1.0, linestyle=:solid)
+        if posterior !== nothing
+            # 95% CI band + median (panel 0: mixing rate vs depth).
+            q = posterior.mixing_rate
+            ok_mask = .!isnan.(q.med[jj])
+            band!(ax0, -b.depth[jj][ok_mask], q.lo[jj][ok_mask], q.hi[jj][ok_mask];
+                  color=(:steelblue, 0.3), direction=:y)
+            lines!(ax0, q.med[jj][ok_mask], -b.depth[jj][ok_mask];
+                   color=:steelblue, linewidth=2)
+            # MAP demoted to thin dashed reference
+            scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
+                     color=:black, markersize=3)
         else
-            lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
-                   color=col_overlay, linewidth=1.0, linestyle=:solid)
+            scatter!(ax0, b.mixing_rate[jj], -b.depth[jj];
+                     color=:black, markersize=5)
+        end
+
+        if overlay !== nothing
+            b2 = overlay.b
+            jj2 = findall(b2.depth .>= b2.depth_lim)
+            if hasproperty(overlay, :posterior) && overlay.posterior !== nothing
+                q2 = overlay.posterior.mixing_rate
+                ok2 = .!isnan.(q2.med[jj2])
+                band!(ax0, -b2.depth[jj2][ok2], q2.lo[jj2][ok2], q2.hi[jj2][ok2];
+                      color=(col_overlay, 0.18), direction=:y)
+                lines!(ax0, q2.med[jj2][ok2], -b2.depth[jj2][ok2];
+                       color=col_overlay, linewidth=1.0, linestyle=:solid)
+            else
+                lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
+                       color=col_overlay, linewidth=1.0, linestyle=:solid)
+            end
         end
     end
 
@@ -1003,7 +1009,9 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     ax1.xticks = [200,400,600,800]
 
     add_clean_dirty_boundary!(ax1, 0.28, -b.depth_lim,with_label=false)
-    hlines!(ax1,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
+    if show_grid_lines
+        hlines!(ax1,-b.depth;color=(:orange,0.5),linewidth=1.5,linestyle=:dash)
+    end
 
     for k in 1:k_last_state
         t = states.time[k]
@@ -1068,10 +1076,14 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
         if posterior !== nothing
             q = posterior.dar40_profile
             ok_mask = .!isnan.(q.med)
+            # Model uncertainty + median in steelblue, matching the other
+            # depth-profile panels; only the data scatter stays in
+            # col_dar40 (orange) so the panel-3 colour cue points to "the
+            # data is dar40", not "the model output is dar40-shaped".
             band!(ax3, -b.depth[ok_mask], q.lo[ok_mask], q.hi[ok_mask];
-                  color=(col_dar40, 0.3), direction=:y)
+                  color=(:steelblue, 0.3), direction=:y)
             lines!(ax3, q.med[ok_mask], -b.depth[ok_mask];
-                   color=col_dar40, linewidth=2)
+                   color=:steelblue, linewidth=2)
             k = argmin(abs.(states.time[1:k_last_state] .- joint.time_min))
             lines!(ax3, states.dar40[:,k], -b.depth;
                    color=:black, linewidth=1, linestyle=:dash)
