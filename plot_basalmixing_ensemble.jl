@@ -25,6 +25,7 @@ using DataFrames
 using CairoMakie
 using Dates
 using Distributions
+using LaTeXStrings
 using Turing   # loads FlexiChains so JLD2 can reconstruct the chain type on read
 
 include("BasalMixingModel.jl")
@@ -237,55 +238,62 @@ function plot_ensemble(;
     sec     = secondary === nothing ? nothing :
               map_best_run(secondary.chain, secondary.k81, secondary.dar40, secondary.depth)
 
-    primary_label = "primary (:$likelihood)"
+    # LaTeX labels for legends.
+    function lik_latex(lik::Symbol)
+        lik === :combined && return L"^{81}Kr+^{40}Ar"
+        lik === :kr81     && return L"^{81}Kr"
+        lik === :ar40     && return L"^{40}Ar"
+        return LaTeXString(string(lik))
+    end
+    primary_label   = lik_latex(likelihood)
     secondary_label = secondary === nothing ? nothing :
-                      "secondary (:$(get(secondary, :likelihood, :unknown)))"
+                      lik_latex(get(secondary, :likelihood, :unknown))
 
-    ## Posterior trajectory bands (primary + secondary if present) ##
+    ## Posterior trajectory bands (primary only — best-fit plot omits kr81 lines) ##
     println("Computing primary posterior trajectories (n_thin=300)…")
     posterior = compute_posterior_trajectories(chain, k81, dar40, depth; n_thin=300)
     println("  used $(posterior.n_used) samples")
 
-    posterior_sec = nothing
-    if sec !== nothing
-        println("Computing secondary posterior trajectories (n_thin=300)…")
-        posterior_sec = compute_posterior_trajectories(secondary.chain,
-                                                      secondary.k81, secondary.dar40, secondary.depth;
-                                                      n_thin=300)
-        println("  used $(posterior_sec.n_used) samples")
-    end
-
-    ## Best-fit depth profiles ##
-    overlay = sec === nothing ? nothing :
-              (; b=sec.b, t_max=sec.t_elapsed_map, label=secondary_label,
-                 posterior=posterior_sec)
+    ## Best-fit depth profiles — primary only ##
     fig_best = plot_BasalMixingModelRun(primary.b;
                                         k81_obs=k81, dar40_obs=dar40,
                                         t_max=primary.t_elapsed_map,
-                                        overlay=overlay,
+                                        overlay=nothing,
                                         posterior=posterior)
 
     ## log-posterior scatter ##
+    col_overlay_hist = "#993366"   # dark magenta — matches col_overlay in plot_BasalMixingModelRun
     fig_logp = Figure(size=(900, 700))
     ipar = 0
+    ax_first_logp = nothing
     for (param, label) in zip(params, labels)
         string(param) in names(primary.df) || continue
         ipar += 1
         row, col = divrem(ipar-1, 2)
         ax = Axis(fig_logp[row+1, col+1], xlabel=label, ylabel="log p")
+        ipar == 1 && (ax_first_logp = ax)
         ylims!(ax, (-50, 0))
         if sec !== nothing && string(param) in names(sec.df)
             scatter!(ax, sec.df[!, param], sec.df.logjoint;
-                     alpha=0.4, markersize=5, color=:black,
-                     label=secondary_label)
+                     alpha=0.4, markersize=5, color=col_overlay_hist)
             scatter!(ax, [sec.df[sec.best_idx, param]], [sec.df.logjoint[sec.best_idx]];
-                     color=:black, marker=:diamond, markersize=10)
+                     color=col_overlay_hist, marker=:diamond, markersize=10)
         end
         scatter!(ax, primary.df[!, param], primary.df.logjoint;
-                 alpha=0.6, markersize=6, color=:steelblue,
-                 label=primary_label)
+                 alpha=0.6, markersize=6, color=:steelblue)
         scatter!(ax, [primary.df[primary.best_idx, param]], [primary.df.logjoint[primary.best_idx]];
-                 color=:red, markersize=12, label="MAP")
+                 color=:steelblue, marker=:diamond, markersize=10)
+    end
+    # Shared top-row legend identifying the two chains.
+    if ax_first_logp !== nothing
+        logp_legend_elems = LegendElement[MarkerElement(color=:steelblue, marker=:circle, markersize=8)]
+        logp_legend_labels = AbstractString[primary_label]
+        if sec !== nothing
+            push!(logp_legend_elems, MarkerElement(color=col_overlay_hist, marker=:circle, markersize=8))
+            push!(logp_legend_labels, secondary_label)
+        end
+        Legend(fig_logp[0, :], logp_legend_elems, logp_legend_labels;
+               orientation=:horizontal, framevisible=false, tellheight=true)
     end
 
     ## Marginal histograms vs priors ##
@@ -299,7 +307,7 @@ function plot_ensemble(;
             (sec === nothing ? "" : "; secondary kept $n_kept_s/$(nrow(sec.df))"))
 
     fig_hist = Figure(size=(900, 700))
-    col_overlay_hist = "#993366"   # dark magenta — matches col_overlay in plot_BasalMixingModelRun
+    # col_overlay_hist is set up above.
     ipar = 0
     for (param, label) in zip(params, labels)
         string(param) in names(primary.df) || continue
@@ -313,8 +321,11 @@ function plot_ensemble(;
         # 95% CI band first (under histogram so it doesn't obscure shape).
         vspan!(ax, [qp[1]], [qp[3]]; color=(:steelblue, 0.12))
         hist!(ax, v_p; bins=20, normalization=:pdf,
-              color=(:steelblue, 0.7), label=primary_label)
-        vlines!(ax, [qp[2]]; color=:steelblue, linewidth=2.5, label="primary median")
+              color=(:steelblue, 0.7))
+        vlines!(ax, [qp[2]]; color=:steelblue, linewidth=2.5)
+        # Primary MAP: same colour as median, thinner.
+        vlines!(ax, [primary.df[primary.best_idx, param]];
+                color=:steelblue, linewidth=1.2)
 
         # --- Secondary distribution + summary stats ---
         if sec !== nothing && string(param) in names(sec.df)
@@ -322,24 +333,32 @@ function plot_ensemble(;
             qs = quantile(v_s, [0.025, 0.5, 0.975])
             vspan!(ax, [qs[1]], [qs[3]]; color=(col_overlay_hist, 0.10))
             stephist!(ax, v_s; bins=20, normalization=:pdf,
-                      color=col_overlay_hist, linewidth=1.5, linestyle=:solid,
-                      label=secondary_label)
-            vlines!(ax, [qs[2]]; color=col_overlay_hist, linewidth=2,
-                    label="secondary median")
+                      color=col_overlay_hist, linewidth=1.5, linestyle=:solid)
+            vlines!(ax, [qs[2]]; color=col_overlay_hist, linewidth=2)
+            # Secondary MAP: same magenta, thinner.
+            vlines!(ax, [sec.df[sec.best_idx, param]];
+                    color=col_overlay_hist, linewidth=1.2)
         end
 
         # Prior line (grey reference).
         if haskey(priors, param) && priors[param] isa Distribution
             plot_prior_line!(ax, priors[param];
-                             label="Prior", linewidth=2, color=:grey50)
+                             linewidth=2, color=:grey50)
         end
-
-        # MAP — same dark blue as the median line but thinner, so it reads as
-        # "same chain, secondary summary" rather than competing with the
-        # median for attention.
-        vlines!(ax, [primary.df[primary.best_idx, param]];
-                color=:steelblue, linewidth=1.2, label="MAP")
     end
+
+    # Shared top-row legend. Declare element vector as LegendElement so we
+    # can mix PolyElement / LineElement entries.
+    hist_legend_elems = LegendElement[PolyElement(color=(:steelblue, 0.7), strokevisible=false)]
+    hist_legend_labels = AbstractString[primary_label]
+    if sec !== nothing
+        push!(hist_legend_elems, LineElement(color=col_overlay_hist, linewidth=1.5))
+        push!(hist_legend_labels, secondary_label)
+    end
+    push!(hist_legend_elems, LineElement(color=:grey50, linewidth=2))
+    push!(hist_legend_labels, "Prior")
+    Legend(fig_hist[0, :], hist_legend_elems, hist_legend_labels;
+           orientation=:horizontal, framevisible=false, tellheight=true)
 
     if save_figures
         mkpath(outdir)
