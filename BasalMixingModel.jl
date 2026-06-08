@@ -918,44 +918,46 @@ the best-fit figure when `show_mixing=false`, so the figure still has a
 Y-axis matches the other depth panels (3036–3053 m); x-axis is hidden.
 """
 function draw_schematic_panel!(fig, col::Int, b)
-    depth_lim     = b.depth_lim
-    depth_bedrock = b.depth_bedrock
-    silty_color = "#C8A878"
+    depth_lim     = b.depth_lim       # 3040 m
+    depth_bedrock = 3053.0            # match other panels' ylim (the model's
+                                       # 3053.44 m bedrock is slightly below
+                                       # the visible region in every panel).
+    silty_color = "#DDB892"           # lighter brown
 
+    # Identical y-limits to every other depth panel, so this aligns
+    # pixel-for-pixel with the k81-age / dar40 panels next door.
     ax = Axis(fig[1, col];
-              limits=((-0.4, 1.2), (-(depth_bedrock + 0.5), -3035)),
-              ylabel="Depth (m)",
+              limits=((0.0, 1.0), (-depth_bedrock, -3035.0)),
+              ylabel="SILTY ICE",
+              xlabel="BEDROCK",
               ygridvisible=false, xgridvisible=false)
     colsize!(fig.layout, col, Auto(0.6))
-    d = collect(-3052:2:-3036)
-    ax.yticks = (d, string.(abs.(d)))
-    hidexdecorations!(ax)
 
-    # Clean ice box (white, above depth_lim).
-    poly!(ax, Rect2f(0, -depth_lim, 1, depth_lim - 3035);
-          color=:white, strokecolor=:black, strokewidth=1)
-    # Silty ice box (tan, below depth_lim down to bedrock).
+    # Hide x ticks/labels but keep the "BEDROCK" xlabel.
+    hidexdecorations!(ax; label=false)
+    # Only label the two interfaces of geological interest.
+    ax.yticks = ([-depth_lim, -depth_bedrock],
+                 [string(Int(depth_lim)), string(Int(depth_bedrock))])
+
+    # Model boxes fill the panel exactly — the axis frame IS the outer
+    # border. strokevisible=false on the polys, plus matched ylims,
+    # gives a single clean rectangle outline.
+    poly!(ax, Rect2f(0, -depth_lim, 1, depth_lim - 3035.0);
+          color=:white, strokewidth=0)
     poly!(ax, Rect2f(0, -depth_bedrock, 1, depth_bedrock - depth_lim);
-          color=silty_color, strokecolor=:black, strokewidth=1)
+          color=silty_color, strokewidth=0)
 
-    # Horizontal interfaces in the silty zone.
-    layer_depths = collect((depth_lim + 1.0):1.0:(depth_bedrock - 0.3))
-    for dd in layer_depths
+    # Horizontal interfaces + ↕ mixing arrows, every 1 m in the silty zone.
+    for dd in (depth_lim + 1.0):1.0:(depth_bedrock - 0.5)
         lines!(ax, [0, 1], [-dd, -dd]; color=:grey50, linewidth=1)
-    end
-    # Double-headed mixing arrows centred on each interface.
-    for dd in layer_depths
         text!(ax, 0.5, -dd; text="↕", align=(:center, :center),
               fontsize=18, color=:black)
     end
 
-    # Labels.
-    text!(ax, 0.5, -(depth_lim - 2.0); text="CLEAN ICE 0-250 kyr",
+    # "CLEAN ICE / 0-250 kyr" centred in the clean-ice band.
+    text!(ax, 0.5, -(depth_lim + 3035.0) / 2;
+          text="CLEAN ICE\n0-250 kyr",
           align=(:center, :center), fontsize=9)
-    text!(ax, -0.25, -(depth_lim + depth_bedrock) / 2; text="SILTY ICE",
-          align=(:center, :center), fontsize=12, rotation=π/2)
-    text!(ax, 0.5, -depth_bedrock - 0.25; text="BEDROCK",
-          align=(:center, :top), fontsize=10)
 
     return ax
 end
