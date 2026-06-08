@@ -299,26 +299,44 @@ function plot_ensemble(;
             (sec === nothing ? "" : "; secondary kept $n_kept_s/$(nrow(sec.df))"))
 
     fig_hist = Figure(size=(900, 700))
+    col_overlay_hist = "#9370DB"   # mediumpurple — matches col_overlay in plot_BasalMixingModelRun
     ipar = 0
     for (param, label) in zip(params, labels)
         string(param) in names(primary.df) || continue
         ipar += 1
         row, col = divrem(ipar-1, 2)
         ax = Axis(fig_hist[row+1, col+1], xlabel=label, ylabel="density")
-        hist!(ax, primary.df[mask_p, param]; bins=20, normalization=:pdf,
+
+        # --- Primary distribution + summary stats ---
+        v_p = primary.df[mask_p, param]
+        qp = quantile(v_p, [0.025, 0.5, 0.975])
+        # 95% CI band first (under histogram so it doesn't obscure shape).
+        vspan!(ax, [qp[1]], [qp[3]]; color=(:steelblue, 0.12))
+        hist!(ax, v_p; bins=20, normalization=:pdf,
               color=(:steelblue, 0.7), label=primary_label)
+        vlines!(ax, [qp[2]]; color=:steelblue, linewidth=2.5, label="primary median")
+
+        # --- Secondary distribution + summary stats ---
         if sec !== nothing && string(param) in names(sec.df)
-            # Use stephist (outline only) so the secondary doesn't visually
-            # bury the primary fill.
-            stephist!(ax, sec.df[mask_s, param]; bins=20, normalization=:pdf,
-                      color=:black, linewidth=2, linestyle=:dash,
+            v_s = sec.df[mask_s, param]
+            qs = quantile(v_s, [0.025, 0.5, 0.975])
+            vspan!(ax, [qs[1]], [qs[3]]; color=(col_overlay_hist, 0.10))
+            stephist!(ax, v_s; bins=20, normalization=:pdf,
+                      color=col_overlay_hist, linewidth=1.5, linestyle=:solid,
                       label=secondary_label)
+            vlines!(ax, [qs[2]]; color=col_overlay_hist, linewidth=2,
+                    label="secondary median")
         end
+
+        # Prior line (grey reference).
         if haskey(priors, param) && priors[param] isa Distribution
             plot_prior_line!(ax, priors[param];
                              label="Prior", linewidth=2, color=:grey50)
         end
-        vlines!(ax, [primary.df[primary.best_idx, param]]; color=:red, linewidth=2, label="MAP")
+
+        # MAP — thin vlines, less prominent than the median lines.
+        vlines!(ax, [primary.df[primary.best_idx, param]];
+                color=:red, linewidth=1, label="MAP")
     end
 
     if save_figures

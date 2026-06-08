@@ -940,7 +940,10 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
     col_k81 = ["#487E3D","#8080F7","teal"]
     col_k81_transparent = [(c, 0.2) for c in col_k81]
     col_dar40 = "#BC401E"
-    col_overlay = :black
+    # Muted purple for the secondary chain — visually subordinate to the
+    # primary's saturated colours so the comparison reads "primary is the
+    # foreground". Solid lines (not dashed) and slightly thinner.
+    col_overlay = "#9370DB"   # mediumpurple
 
     if !isnothing(dar40_obs)
         fig = Figure(size=(1000,600))
@@ -983,12 +986,12 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
             q2 = overlay.posterior.mixing_rate
             ok2 = .!isnan.(q2.med[jj2])
             band!(ax0, -b2.depth[jj2][ok2], q2.lo[jj2][ok2], q2.hi[jj2][ok2];
-                  color=(:black, 0.12), direction=:y)
+                  color=(col_overlay, 0.18), direction=:y)
             lines!(ax0, q2.med[jj2][ok2], -b2.depth[jj2][ok2];
-                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+                   color=col_overlay, linewidth=1.0, linestyle=:solid)
         else
             lines!(ax0, b2.mixing_rate[jj2], -b2.depth[jj2];
-                   color=col_overlay, linewidth=1.5, linestyle=:dash)
+                   color=col_overlay, linewidth=1.0, linestyle=:solid)
         end
     end
 
@@ -1034,12 +1037,12 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
             q2 = overlay.posterior.age_profile
             ok2 = .!isnan.(q2.med)
             band!(ax1, -b2.depth[ok2], q2.lo[ok2], q2.hi[ok2];
-                  color=(:black, 0.12), direction=:y)
+                  color=(col_overlay, 0.18), direction=:y)
             lines!(ax1, q2.med[ok2], -b2.depth[ok2];
-                   color=col_overlay, linewidth=2, linestyle=:dash)
+                   color=col_overlay, linewidth=1.2, linestyle=:solid)
         else
             lines!(ax1, b2.states.age_k81[:,k2], -b2.depth;
-                   color=col_overlay, linewidth=2, linestyle=:dash)
+                   color=col_overlay, linewidth=1.2, linestyle=:solid)
         end
     end
 
@@ -1085,12 +1088,12 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
                 q2 = overlay.posterior.dar40_profile
                 ok2 = .!isnan.(q2.med)
                 band!(ax3, -b2.depth[ok2], q2.lo[ok2], q2.hi[ok2];
-                      color=(:black, 0.12), direction=:y)
+                      color=(col_overlay, 0.18), direction=:y)
                 lines!(ax3, q2.med[ok2], -b2.depth[ok2];
-                       color=col_overlay, linewidth=2, linestyle=:dash)
+                       color=col_overlay, linewidth=1.2, linestyle=:solid)
             else
                 lines!(ax3, b2.states.dar40[:,k2], -b2.depth;
-                       color=col_overlay, linewidth=2, linestyle=:dash)
+                       color=col_overlay, linewidth=1.2, linestyle=:solid)
             end
         end
 
@@ -1148,16 +1151,16 @@ function plot_BasalMixingModelRun(b;k81_obs=nothing,dar40_obs=nothing,t_max=noth
                 traj = view(spag2, s, j, :)
                 ok2  = .!isnan.(traj)
                 lines!(ax2, xg2[ok2], traj[ok2];
-                       color=(:black, α2), linewidth=0.5)
+                       color=(col_overlay, α2), linewidth=0.5)
             end
             for (j,d) in enumerate(b2.k81.depth)
                 lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
-                       color=col_overlay, linewidth=1.5, linestyle=:dash)
+                       color=col_overlay, linewidth=1.0, linestyle=:solid)
             end
         else
             for (j,d) in enumerate(b2.k81.depth)
                 lines!(ax2, b2.k81.time[1:k_last_pred2] .- t2, b2.k81.dat[j,1:k_last_pred2];
-                       color=col_overlay, linewidth=1.5, linestyle=:dash)
+                       color=col_overlay, linewidth=1.0, linestyle=:solid)
             end
         end
     end
