@@ -2,10 +2,10 @@
 #
 # Pass this file with -n and select the case with -p, e.g.:
 #
-#   runme -rs -q 12h -w 02:00:00 -o output/ens-combined \
-#         -n par/basalmixing.toml -p ctrl.likelihood=combined
-#   runme -rs -q 12h -w 02:00:00 -o output/ens-kr81 \
-#         -n par/basalmixing.toml -p ctrl.likelihood=kr81
+#   runme -rs -q 12h -w 02:00:00 -n par/basalmixing.toml -o output/ens-combined \
+#          -p ctrl.likelihood=combined
+#   runme -rs -q 12h -w 02:00:00 -n par/basalmixing.toml -o output/ens-kr81 \
+#         -p ctrl.likelihood=kr81
 #
 # runme stages this file into the run directory (applying any -p overrides) and
 # passes it to run_basalmixing_ensemble.jl, which reads the [ctrl] table below.
