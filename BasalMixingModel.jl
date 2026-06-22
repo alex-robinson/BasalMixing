@@ -1269,6 +1269,28 @@ end
 
 
 """
+    repair_chain!(chain)
+
+Work around a FlexiChains + JLD2 round-trip issue: a `FlexiChain` reloaded from
+a JLD2 file carries a stale hash index in its internal `_data` dict, so
+`chain[key]` and `DataFrame(chain)` throw spurious `KeyError`s even though the
+underlying data is intact and iterable. Rebuilding the dict in place (clear,
+then re-insert in iteration order) restores a correct hash index. A no-op for
+chain types without a `_data` field (e.g. legacy MCMCChains snapshots).
+"""
+function repair_chain!(chain)
+    if hasfield(typeof(chain), :_data) && getfield(chain, :_data) isa AbstractDict
+        d = getfield(chain, :_data)
+        kv = collect(pairs(d))
+        empty!(d)
+        for (k, v) in kv
+            d[k] = v
+        end
+    end
+    return chain
+end
+
+"""
     load_ensemble_results(path::String) -> NamedTuple
 
 Read a JLD2 snapshot written by `run_basalmixing_ensemble.jl`. Returns a
@@ -1279,7 +1301,7 @@ likelihood)`. Old snapshots that pre-date the `likelihood` field default to
 function load_ensemble_results(path::String)
     isfile(path) || error("ensemble results file not found: $path")
     JLD2.jldopen(path, "r") do f
-        chain = f["chain"]
+        chain = repair_chain!(f["chain"])
         k81 = f["k81"]
         dar40 = f["dar40"]
         depth = f["depth"]
