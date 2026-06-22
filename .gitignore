@@ -2,6 +2,7 @@
 *Manifest.toml
 plots
 logs
+*.jld2
 
 # LaTeX build artefacts (the .pdf and .tex are tracked; everything else is regenerable)
 docs/*.aux

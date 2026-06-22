@@ -1,4 +1,4 @@
-        id    depth_top    depth_bottom    age age_hi  age_lo
-GISP2-3045      3044.60	        3045.00    577     32      29
-GISP2-3048      3047.20	        3047.60    649     30      29
-GISP2-3050      3049.64	        3050.04    714     34      29
+        id    depth_top    depth_bottom    age age_hi  age_lo  half_life
+GISP2-3045      3044.60	        3045.00    586     37      33         28
+GISP2-3048      3047.20	        3047.60    645     34      30         31
+GISP2-3050      3049.64	        3050.04    722     34      30         34
