@@ -2,6 +2,6 @@
 
 #qu=compute # levante
 qu=12h   # albedo
-
-runme -rs -q ${qu} -w 06:00:00 -n par/basalmixing.toml -o output/ens-combined -p ctrl.likelihood=combined
-runme -rs -q ${qu} -w 06:00:00 -n par/basalmixing.toml -o output/ens-kr81 -p ctrl.likelihood=kr81
+ensdir="fdirty-wide"
+runme -rs -q ${qu} -w 06:00:00 -n par/basalmixing.toml -o output/${ensdir}/combined -p ctrl.likelihood=combined
+runme -rs -q ${qu} -w 06:00:00 -n par/basalmixing.toml -o output/${ensdir}/kr81 -p ctrl.likelihood=kr81
