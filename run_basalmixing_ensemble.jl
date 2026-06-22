@@ -7,6 +7,7 @@ using Revise
 
 using Turing
 const AMH = Turing.Inference.AdvancedMH   # AdvancedMH is a Turing dep; reach it via Turing
+using FlexiChains: summarystats           # Turing's chains are FlexiChains; summarystats isn't re-exported
 using LinearAlgebra
 using Random
 
@@ -14,6 +15,7 @@ using Dates
 using CSV
 using DataFrames
 using JLD2
+using TOML
 
 Random.seed!(42)
 
@@ -83,8 +85,14 @@ priors = (
     f_dirty     = Uniform(3.0, 8.0),    # dirty/clean mixing-rate ratio
     t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
     F_ar40      = Uniform(0.004,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
-    σ_k81 = 30.0,
-    σ_dar40 = 0.03,
+    # σ_k81 and σ_dar40 are per-observation 1σ measurement-error VECTORS taken
+    # from the data tables; they are filled in below, right after the data is
+    # loaded (see the `merge` call). σ_k81 combines each ⁸¹Kr sample's
+    # (age_hi, age_lo) bounds in quadrature; σ_dar40 is the δ⁴⁰Ar dar40_err
+    # column. The likelihood passes them as standard-deviation vectors —
+    # MvNormal(μ, σ::Vector) treats σ as standard deviations — replacing the
+    # old isotropic `σ * I` form, which treated the scalar as a VARIANCE (so the
+    # old σ_k81 = 30 meant an effective std of only √30 ≈ 5.5 kyr).
 
     # Inception time t_0 in kyr (negative = past). Magnitude |t_0| is the
     # forward-model run length 0 → -t_0. Bounds [-3000, -700] kyr come from
@@ -121,8 +129,8 @@ the same prior block and likelihood-gating logic.
     duration = -t_0
     p = (delta=delta, m_clean=m_clean, f_dirty=f_dirty,
          t_old=t_old, F_ar40=F_ar40, t_target=duration)
-    # Loose ODE tolerance — 1e-4 still ~100× tighter than σ_k81=30 kyr and
-    # σ_dar40=0.03 ‰. The probe with this setting agreed with Euler to
+    # Loose ODE tolerance — 1e-4 still far tighter than the per-sample σ_k81
+    # (~32–35 kyr) and σ_dar40 (~0.03 ‰). The probe with this setting agreed with Euler to
     # within max |Δage| = 0.14 kyr, max |Δdar40| = 4.5e-4 ‰.
     k81_age_pred_v, dar40_pred_v, ok = run_basal_mixing_ode(p, geom;
                                                             reltol=1e-4, abstol=1e-7)
@@ -138,12 +146,12 @@ the same prior block and likelihood-gating logic.
     end
 
     if likelihood === :combined
-        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
-        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81)
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40)
     elseif likelihood === :kr81
-        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81)
     elseif likelihood === :ar40
-        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40)
     else
         error("Unknown likelihood: $likelihood")
     end
@@ -196,12 +204,12 @@ integrator `RunBasalMixingModelToTime!` with a per-thread buffer pool.
     end
 
     if likelihood === :combined
-        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
-        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81)
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40)
     elseif likelihood === :kr81
-        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81 * I)
+        k81_age_obs ~ MvNormal(k81_age_pred, σ_k81)
     elseif likelihood === :ar40
-        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40 * I)
+        dar40_obs   ~ MvNormal(dar40_pred,   σ_dar40)
     else
         error("Unknown likelihood: $likelihood (expected :combined, :kr81, or :ar40)")
     end
@@ -211,8 +219,49 @@ end
 
 ## SCRIPT ##
 
-depth, setup = generate_depths("highdirty";step=0.25)
+# --- Run parameters -----------------------------------------------------------
+# Read from a TOML parameter file. runme stages the file into the run directory
+# and passes it as the first argument, after applying any `-p ctrl.key=value`
+# overrides. The `[ctrl]` table selects the likelihood case, sampler, and
+# per-chain sample counts. Run standalone without an argument and the built-in
+# defaults below are used, so the script still works from the repo root.
+parfile = isempty(ARGS) ? "basalmixing.toml" : ARGS[1]
+if isfile(parfile)
+    ctrl = get(TOML.parsefile(parfile), "ctrl", Dict{String,Any}())
+    println("Loaded run parameters from $parfile")
+else
+    ctrl = Dict{String,Any}()
+    println("No parameter file ($parfile) found; using built-in defaults.")
+end
+
+likelihood         = Symbol(get(ctrl, "likelihood", "combined"))
+sampler_choice     = Symbol(get(ctrl, "sampler", "nuts"))
+n_adapts_nuts      = get(ctrl, "n_adapts", 100)
+n_samples_nuts     = get(ctrl, "n_samples", 150)
+n_chains           = get(ctrl, "n_chains", 4)
+target_accept_nuts = get(ctrl, "target_accept", 0.65)
+depth_setup_name   = get(ctrl, "depth_setup", "highdirty")
+depth_step         = get(ctrl, "depth_step", 0.25)
+n_samples          = get(ctrl, "n_samples_mh", 10_000)  # MH variants only
+
+println("Run configuration:")
+println("  likelihood    = :$likelihood")
+println("  sampler       = :$sampler_choice")
+println("  n_adapts      = $n_adapts_nuts")
+println("  n_samples     = $n_samples_nuts (per chain)")
+println("  n_chains      = $n_chains")
+println("  target_accept = $target_accept_nuts")
+println("  depth_setup   = $depth_setup_name (step $depth_step)")
+
+depth, setup = generate_depths(depth_setup_name; step=depth_step)
 (k81, dar40) = load_basalmixing_data(depth=depth)
+
+# Per-observation 1σ measurement-error vectors from the data tables (see priors note):
+#   σ_k81   = sqrt((age_hi² + age_lo²)/2) per ⁸¹Kr sample (quadrature of asymmetric bounds)
+#   σ_dar40 = dar40_err per δ⁴⁰Ar sample
+# These override the placeholders in the `priors` block and are passed to the
+# likelihood as standard deviations.
+priors = merge(priors, (σ_k81 = k81.age_sigma, σ_dar40 = dar40.dar40_sigma))
 
 # Allocate one BasalMixingModel per thread to avoid concurrent mutation of shared buffers
 # when MCMCThreads() runs chains in parallel. Size by maxthreadid() — Julia >= 1.9 may
@@ -221,7 +270,8 @@ depth, setup = generate_depths("highdirty";step=0.25)
 bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
       for _ in 1:Threads.maxthreadid()]
 
-## Sampler selection ##
+## Sampler selection — the active sampler is set by the `sampler` key in the
+## parameter file (read above); per-chain counts come from the file too.
 # :nuts        -> No-U-Turn Sampler via Turing's `NUTS`. Requires the
 #                 ODE-based forward model (`run_basal_mixing_ode`) and
 #                 ForwardDiff. The right choice when you want a true Bayesian
@@ -233,18 +283,6 @@ bs = [BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=d
 #                 full proposal covariance toward target acceptance α.
 # :mh_tuned    -> MH with per-parameter LinkedRW proposals.
 # :mh_default  -> Turing's default MH (uses priors as proposals; poor mixing here).
-sampler_choice = :nuts
-
-n_samples = 10_000   # used for the MH variants; per-chain count
-n_chains  = 4
-
-# NUTS-specific tuning: adaptation and post-adapt sample counts (per chain).
-# Tuned (2026-06-05) so each chain fits inside the harness ~25 min kill window:
-# probe data shows ~6.4 s/draw post-smoothing, so 250 draws ≈ 26 min single-chain.
-# 4 chains × MCMCThreads in parallel → 600 post-adapt samples total at ~25 min wall.
-n_adapts_nuts = 100
-n_samples_nuts = 150
-target_accept_nuts = 0.65
 
 # Precompute the ODE-path geometry (Float64-only depth/thickness data).
 # Cheap to allocate; reused by every NUTS likelihood eval.
@@ -253,80 +291,87 @@ geom = BasalMixingGeometry(depth, 3040.0, 3053.44, k81.depth, dar40.depth)
 # Optional per-parameter linked-space variance overrides for :mh_tuned.
 mh_variances = NamedTuple()
 
-## Likelihood configurations to run back-to-back.
-# Each entry produces a separate JLD2 snapshot under results/.
-likelihoods = (:combined, :kr81)
+## Run the single configured likelihood case (selected by `likelihood`, read
+## from the parameter file). Produces one JLD2 snapshot, `chain.jld2`, in the
+## current working directory — i.e. the runme run directory.
 
-results = Dict{Symbol,Any}()
+println("\n========================================")
+println("Running likelihood = :$likelihood")
+println("========================================")
 
-for likelihood in likelihoods
-
-    println("\n========================================")
-    println("Running likelihood = :$likelihood")
-    println("========================================")
-
-    if sampler_choice === :nuts
-        model = basal_mixing_nuts(k81.age, dar40.dar40, geom, priors, likelihood)
-    else
-        model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors, likelihood)
-    end
-
-    if sampler_choice === :nuts
-        # max_depth=8 (256 leapfrogs/draw worst case) caps adaptation cost.
-        # The AD-timing diagnostic shows ~60 ms/gradient → ≤15 s/draw at depth 8.
-        # Default max_depth=10 lets adaptation drift to 60 s/draw, which is what
-        # the killed smoke test was doing.
-        spl = NUTS(n_adapts_nuts, target_accept_nuts;
-                   max_depth=8,
-                   adtype=Turing.ADTypes.AutoForwardDiff())
-        chain = sample(model, spl, MCMCThreads(), n_samples_nuts, n_chains;
-                       progress=true)
-    elseif sampler_choice === :mh_default
-        spl = MH()
-        chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
-    elseif sampler_choice === :mh_tuned
-        spl = tuned_mh(priors; var_linked=0.1, variances=mh_variances)
-        chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
-    elseif sampler_choice === :mh_ram
-        spl = externalsampler(
-            AMH.RobustAdaptiveMetropolis(; α=0.234, γ=2/3);
-            adtype=Turing.ADTypes.AutoFiniteDiff(),
-        )
-        chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
-    elseif sampler_choice === :emcee
-        n_walkers = 32
-        n_iter    = 500
-        spl = Emcee(n_walkers, 2.0)
-        chain = sample(model, spl, n_iter)
-    else
-        error("Unknown sampler_choice: $sampler_choice")
-    end
-
-    println("Sampler: $sampler_choice  |  acceptance ≈ ",
-            round(acceptance_rate(chain), digits=3))
-
-    results_path = "results/$(sampler_choice)-chain-$(likelihood).jld2"
-    save_ensemble_results(results_path;
-                          chain, k81, dar40, depth, setup, priors,
-                          sampler_choice, likelihood)
-
-    df = DataFrame(chain)
-    df.logjoint = vec(chain[:logjoint])
-    best_idx = argmax(df.logjoint)
-    map_cols = filter(c -> string(c) in names(df),
-                      [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0])
-    @info "MAP for :$likelihood (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, map_cols]
-    for p in map_cols
-        v = df[!, p]
-        qs = quantile(v, [0.025, 0.5, 0.975])
-        @info "$(p): q025=$(round(qs[1]; sigdigits=4)) median=$(round(qs[2]; sigdigits=4)) q975=$(round(qs[3]; sigdigits=4)) std=$(round(std(v); sigdigits=4))"
-    end
-
-    results[likelihood] = (; chain, results_path)
+if sampler_choice === :nuts
+    model = basal_mixing_nuts(k81.age, dar40.dar40, geom, priors, likelihood)
+else
+    model = basal_mixing(k81.age, dar40.dar40, bs, (k81, dar40), 0.2, priors, likelihood)
 end
 
-## Plotting (overlays kr81-only on combined):
-##
+if sampler_choice === :nuts
+    # max_depth=8 (256 leapfrogs/draw worst case) caps adaptation cost.
+    # The AD-timing diagnostic shows ~60 ms/gradient → ≤15 s/draw at depth 8.
+    # Default max_depth=10 lets adaptation drift to 60 s/draw, which is what
+    # the killed smoke test was doing.
+    spl = NUTS(n_adapts_nuts, target_accept_nuts;
+               max_depth=8,
+               adtype=Turing.ADTypes.AutoForwardDiff())
+    chain = sample(model, spl, MCMCThreads(), n_samples_nuts, n_chains;
+                   progress=true)
+elseif sampler_choice === :mh_default
+    spl = MH()
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :mh_tuned
+    spl = tuned_mh(priors; var_linked=0.1, variances=mh_variances)
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :mh_ram
+    spl = externalsampler(
+        AMH.RobustAdaptiveMetropolis(; α=0.234, γ=2/3);
+        adtype=Turing.ADTypes.AutoFiniteDiff(),
+    )
+    chain = sample(model, spl, MCMCThreads(), n_samples, n_chains)
+elseif sampler_choice === :emcee
+    n_walkers = 32
+    n_iter    = 500
+    spl = Emcee(n_walkers, 2.0)
+    chain = sample(model, spl, n_iter)
+else
+    error("Unknown sampler_choice: $sampler_choice")
+end
+
+println("Sampler: $sampler_choice  |  acceptance ≈ ",
+        round(acceptance_rate(chain), digits=3))
+
+# --- Convergence diagnostics: per-parameter R̂ (want ≲ 1.01), ESS, and
+# --- (for NUTS) the divergence count (want 0). Use these to judge whether
+# --- the posterior is well sampled before trusting the estimates.
+println("\n--- Convergence diagnostics (:$likelihood) ---")
+show(stdout, MIME("text/plain"), summarystats(chain))
+println()
+if sampler_choice === :nuts
+    # FlexiChains stores NUTS per-transition stats as "extras"; numerical_error
+    # flags divergent transitions (1.0) vs clean ones (0.0).
+    ndiv = Int(sum(chain[:numerical_error]))
+    ntot = length(chain[:numerical_error])
+    println("divergences = $ndiv / $ntot post-warmup transitions (want 0)")
+end
+
+# Save the chain snapshot into the current working (= run) directory.
+results_path = "chain.jld2"
+save_ensemble_results(results_path;
+                      chain, k81, dar40, depth, setup, priors,
+                      sampler_choice, likelihood)
+
+df = DataFrame(chain)
+df.logjoint = vec(chain[:logjoint])
+best_idx = argmax(df.logjoint)
+map_cols = filter(c -> string(c) in names(df),
+                  [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0])
+@info "MAP for :$likelihood (joint logp = $(round(maximum(df.logjoint); digits=2)))" df[best_idx, map_cols]
+for p in map_cols
+    v = df[!, p]
+    qs = quantile(v, [0.025, 0.5, 0.975])
+    @info "$(p): q025=$(round(qs[1]; sigdigits=4)) median=$(round(qs[2]; sigdigits=4)) q975=$(round(qs[3]; sigdigits=4)) std=$(round(std(v); sigdigits=4))"
+end
+
+## To compare combined vs 81Kr-only (needs both run directories' chains):
 ##     include("plot_basalmixing_ensemble.jl")
-##     plot_ensemble_comparison("results/emcee-chain-combined.jld2",
-##                              "results/emcee-chain-kr81.jld2")
+##     plot_ensemble_comparison("output/ens-combined/chain.jld2",
+##                              "output/ens-kr81/chain.jld2")

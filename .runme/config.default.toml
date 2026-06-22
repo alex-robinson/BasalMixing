@@ -1,0 +1,31 @@
+# runme project config (tracked template).
+#
+# This is the tracked default. `runme config init` copies it to
+# `.runme/config.toml` (gitignored), which is what runme actually reads. Edit
+# your local `config.toml` to set the values for your account; edit this file
+# only to change what new contributors get on first init.
+
+# HPC system. Must match a top-level key in queues.json. The "12h" queue alias
+# used in the standard commands lives under awi_albedo.
+hpc = "awi_albedo"
+
+# SLURM account to charge for submitted jobs (set this locally; see
+# `runme accounts` on the login node).
+account = "CHANGEME"
+
+# Job name used by sbatch (#SBATCH --job-name).
+jobname = "basalmixing"
+
+# OpenMP / cpus-per-task. Drives --cpus-per-task in the submit script and, via
+# SLURM_CPUS_PER_TASK, the number of Julia threads (one per MCMC chain). Keep
+# this equal to ctrl.n_chains in par/basalmixing.toml (4).
+omp = 4
+
+# Default memory per node in MB. -1 leaves #SBATCH --mem unset.
+mem = -1
+
+# Email address for SLURM notifications. Blank disables them.
+email = ""
+
+# Notification types. Valid values: FAIL, REQUEUE, BEGIN, END, ALL.
+mail_type = ["FAIL"]

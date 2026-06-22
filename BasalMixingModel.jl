@@ -33,15 +33,12 @@ function load_basalmixing_data(;depth=[0.0,5000.0])
     idx = findall(k81.depth .>= minimum(depth) .&& k81.depth .<= maximum(depth))
     k81 = k81[idx,:]
 
-    # Get errors too
-    n_obs_k81 = length(k81.age)
-    k81_sigma = (sum(k81.age_hi) + sum(k81.age_lo)) / (2*n_obs_k81)
-    n_obs_dar40 = length(ar40.dar40)
-    dar40_sigma = sum(ar40.dar40_err) / n_obs_dar40
-
-    # Single values, but store in DataFrames
-    k81[!,:age_sigma] = fill(k81_sigma,n_obs_k81)
-    ar40[!,:dar40_sigma] = fill(dar40_sigma,n_obs_dar40)
+    # Per-observation 1σ measurement errors (stored as columns in the DataFrames).
+    # ⁸¹Kr: combine each sample's asymmetric (age_hi, age_lo) bounds in quadrature
+    #       into a symmetric standard deviation, σ = sqrt((hi² + lo²) / 2).
+    k81[!,:age_sigma]    = sqrt.((k81.age_hi.^2 .+ k81.age_lo.^2) ./ 2)
+    # δ⁴⁰Ar: the per-sample reported measurement error.
+    ar40[!,:dar40_sigma] = ar40.dar40_err
 
     #return Dict(:k81=>k81, :ar40=>ar40)
     return (k81, ar40)

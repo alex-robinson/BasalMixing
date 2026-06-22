@@ -1,0 +1,26 @@
+{
+    "exe_default": "basalmixing.sh",
+
+    "par_path_as_argument": true,
+
+    "exe_aliases":
+        {   "main": "basalmixing.sh"
+        },
+
+    "grp_aliases": {},
+
+    "par_paths": {},
+
+    "files":
+        [   "BasalMixingModel.jl",
+            "run_basalmixing_ensemble.jl",
+            "Project.toml"
+        ],
+
+    "dir-special":
+    {
+        "data": "data"
+    },
+
+    "links": []
+}

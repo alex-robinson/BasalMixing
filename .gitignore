@@ -4,6 +4,11 @@ plots
 logs
 *.jld2
 
+# runme: per-host config (gitignored; scaffolded by `runme config init`) and
+# run/output directories.
+.runme/config.toml
+output/
+
 # LaTeX build artefacts (the .pdf and .tex are tracked; everything else is regenerable)
 docs/*.aux
 docs/*.log

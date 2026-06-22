@@ -1,0 +1,31 @@
+# Starting parameters for the BasalMixing ensemble run.
+#
+# Pass this file with -n and select the case with -p, e.g.:
+#
+#   runme -rs -q 12h -w 02:00:00 -o output/ens-combined \
+#         -n par/basalmixing.toml -p ctrl.likelihood=combined
+#   runme -rs -q 12h -w 02:00:00 -o output/ens-kr81 \
+#         -n par/basalmixing.toml -p ctrl.likelihood=kr81
+#
+# runme stages this file into the run directory (applying any -p overrides) and
+# passes it to run_basalmixing_ensemble.jl, which reads the [ctrl] table below.
+# Note: -p can only override keys that already exist here, so keep this complete.
+
+[ctrl]
+# Observation channels the posterior is conditioned on:
+#   "combined" -> both 81Kr ages and d40Ar    "kr81" -> 81Kr ages only
+#   "ar40"     -> d40Ar only
+likelihood = "combined"
+
+# Sampler: "nuts" (default), "emcee", "mh_ram", "mh_tuned", or "mh_default".
+sampler = "nuts"
+
+# NUTS adaptation steps and post-adaptation draws per chain, plus target accept.
+n_adapts = 100
+n_samples = 150
+n_chains = 4
+target_accept = 0.65
+
+# Depth-grid discretisation passed to generate_depths.
+depth_setup = "highdirty"
+depth_step = 0.25
