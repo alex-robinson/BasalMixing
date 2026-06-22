@@ -3,7 +3,6 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
-using Revise
 using Dates
 using CairoMakie
 using CSV

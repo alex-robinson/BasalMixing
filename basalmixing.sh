@@ -21,7 +21,10 @@ parfile="${1:-basalmixing.toml}"
 nthreads="${SLURM_CPUS_PER_TASK:-${OMP_NUM_THREADS:-4}}"
 
 echo "=== BasalMixing ensemble: sampling (parfile=${parfile}, threads=${nthreads}) ==="
-julia --project=. -e 'using Pkg; Pkg.instantiate()'
-julia -t "${nthreads}" --project=. run_basalmixing_ensemble.jl "${parfile}"
+# --startup-file=no is required: a personal ~/.julia/config/startup.jl runs
+# `Pkg.activate(myanalysis)` unconditionally, which otherwise hijacks --project=.
+# and makes instantiate resolve the wrong environment (no Manifest in the run dir).
+julia --startup-file=no --project=. -e 'using Pkg; Pkg.instantiate()'
+julia --startup-file=no -t "${nthreads}" --project=. run_basalmixing_ensemble.jl "${parfile}"
 
 echo "=== Done: chain.jld2 written. Plot separately from the repo. ==="

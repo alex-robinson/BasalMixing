@@ -3,8 +3,6 @@ cd(@__DIR__)
 import Pkg; Pkg.activate(".")
 #########################################################
 
-using Revise
-
 using Turing
 const AMH = Turing.Inference.AdvancedMH   # AdvancedMH is a Turing dep; reach it via Turing
 using StatsBase: summarystats             # Turing's FlexiChains chains define their summarystats method on StatsBase's
