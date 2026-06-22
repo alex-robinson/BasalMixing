@@ -78,9 +78,16 @@ priors = (
     # piled up on their upper edges. New bounds keep the priors physically
     # plausible (higher values are unphysical) while letting the typical
     # set sit in the interior, which NUTS needs for sane step-size adaptation.
+    #
+    # f_dirty widened again 8.0 -> 15.0 (2026-06-22): after the σ² fix to the
+    # 81Kr likelihood (effective std 5.5 -> ~32-35 kyr), f_dirty re-piled on
+    # the upper 8.0 edge. This diagnostic bound lets it find an interior mode
+    # if one exists; if it still rails at 15, the misfit is structural (the
+    # single-contrast mixing profile can't thread all three 81Kr ages) rather
+    # than a too-tight prior.
     delta       = Uniform(0.3, 3.0),    # transition-zone thickness (m)
     m_clean     = truncated(Normal(0.03, 0.002), lower=0.0), # 0.03 m/kyr
-    f_dirty     = Uniform(3.0, 8.0),    # dirty/clean mixing-rate ratio
+    f_dirty     = Uniform(3.0, 15.0),   # dirty/clean mixing-rate ratio
     t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
     F_ar40      = Uniform(0.004,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
     # σ_k81 and σ_dar40 are per-observation 1σ measurement-error VECTORS taken
