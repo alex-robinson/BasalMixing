@@ -254,7 +254,7 @@ function plot_ensemble(;
 )
     params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
     labels = ["delta (m)", "m_clean (m/yr)", "f_dirty",
-              "t_old (kyr)", "F_ar40 (cc/m²/kyr)", "t_0 (kyr)"]
+              "t_old (kyr)", "F_ar40 (cc m⁻² kyr⁻¹)", "t_0 (kyr)"]
     if !show_ar40
         # Drop the ⁴⁰Ar-only parameter (F_ar40) from the parameter scans.
         keep = findall(p -> p !== :F_ar40, params)

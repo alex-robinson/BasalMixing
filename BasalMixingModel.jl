@@ -552,7 +552,9 @@ Mirrors the Euler integrator's semantics, with one deliberate softening:
 - Mixing flux is centred-difference between adjacent cells; clean-ice cells
   receive no mixing flux (their endpoint contributions are skipped).
 - ⁴⁰Ar receives a bottom-source flux `F_ar40 / thickness[end]` in the
-  deepest cell.
+  deepest cell. `F_ar40` is a per-area ⁴⁰Ar flux in cc(STP) m⁻² kyr⁻¹:
+  `F_ar40 / thickness[end]` is the ⁴⁰Ar concentration rate in cc m⁻³ kyr⁻¹
+  (thickness in m). See `f_ar40_to_mol` to convert to mol m⁻² yr⁻¹.
 """
 function basal_mixing_rhs!(du, u, p, t)
     N = p.N
@@ -880,6 +882,30 @@ function calc_ar40_with_aging(t_kyr::Real, t_old::Real;
     #Ar40cc_mod=TAC*.00934*100^3; % ccs of 40 argon per cubic meter for modern ice
 
     return ar40
+end
+
+# Global solid-Earth ⁴⁰Ar degassing rate, Bender et al. 2010 (1.1 ± 0.1 × 10⁸
+# mol/yr), and Earth's surface area — kept here for context conversions only.
+const AR40_GLOBAL_DEGASSING_MOL_YR = 1.1e8
+const EARTH_AREA_M2                = 5.1e14
+
+"""
+    f_ar40_to_mol(F_ar40; per_year=true)
+
+Convert the bottom-source ⁴⁰Ar flux `F_ar40` from the model's native units
+[cc(STP) m⁻² kyr⁻¹] to a molar flux: mol m⁻² yr⁻¹ (default) or mol m⁻² kyr⁻¹
+(`per_year=false`). Uses the STP molar volume 22,414 cc/mol.
+
+Context only — NOT a constraint. The global solid-Earth ⁴⁰Ar degassing rate is
+`AR40_GLOBAL_DEGASSING_MOL_YR` = 1.1 ± 0.1 × 10⁸ mol/yr (Bender et al. 2010);
+spread over `EARTH_AREA_M2` = 5.1 × 10¹⁴ m² that is ≈ 2.2 × 10⁻⁷ mol m⁻² yr⁻¹.
+Degassing into basal ice over a craton differs from this global mean by orders
+of magnitude, so this global figure does not constrain `F_ar40`.
+"""
+function f_ar40_to_mol(F_ar40; per_year::Bool=true)
+    V_stp = 22414.0                 # cc per mol at STP
+    mol_m2_kyr = F_ar40 / V_stp
+    return per_year ? mol_m2_kyr / 1000.0 : mol_m2_kyr
 end
 
 ### PLOTTING ###

@@ -89,7 +89,8 @@ priors = (
     m_clean     = truncated(Normal(0.03, 0.002), lower=0.0), # 0.03 m/kyr
     f_dirty     = Uniform(3.0, 15.0),   # dirty/clean mixing-rate ratio
     t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
-    F_ar40      = Uniform(0.004,0.007), #Normal(0.075,0.01),   # 0.075 m^3 / kyr
+    F_ar40      = Uniform(0.004,0.007), # bottom-source ⁴⁰Ar flux, cc(STP) m⁻² kyr⁻¹
+                                        # (enters ODE as F_ar40/thickness[end])
     # σ_k81 and σ_dar40 are per-observation 1σ measurement-error VECTORS taken
     # from the data tables; they are filled in below, right after the data is
     # loaded (see the `merge` call). σ_k81 combines each ⁸¹Kr sample's
