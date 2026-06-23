@@ -169,17 +169,35 @@ function compute_posterior_trajectories(chain, k81_obs, dar40_obs, depth;
 end
 
 """
-    map_best_run(chain, k81, dar40, depth) -> (b, t_elapsed_map, p_best, df, best_idx)
+    map_best_run(chain, k81, dar40, depth) -> (b, t_elapsed_map, p_best, p_ref, df, best_idx)
 
-Re-run the forward model at the chain's MAP parameters. The sampled-time model
-only ever evaluated the likelihood at the single endpoint t = |t_0|, so the
-re-run integrates exactly 0 → |t_0| and the trajectory beyond that is left
-unrendered by `plot_BasalMixingModelRun` (it crops at `t_max`).
+Re-run the forward model at a *reproducible* reference parameter set for the
+best-fit overlay.
+
+`t_0` is non-identifiable: the ⁸¹Kr ages (and, modulo the strong t_0–F_ar40
+degeneracy, δ⁴⁰Ar) saturate well before the prior's old edge, so the
+likelihood is flat in `t_0` and the old `argmax(logjoint)` "best" landed on an
+essentially arbitrary draw — the reference curve jumped run-to-run and looked
+unstable in the time panel. Instead we take the shape parameters
+(delta, m_clean, f_dirty, t_old, F_ar40) from the draw with the highest
+*loglikelihood* (best data fit, prior-independent) and pin `t_0` to its
+posterior median. Because predictions are insensitive to `t_0` past saturation,
+this leaves the depth-profile fit essentially unchanged while giving the time
+panel a representative, stable start time.
+
+The sampled-time model only evaluated the likelihood at the endpoint t = |t_0|,
+so the re-run integrates exactly 0 → |t_0| and the trajectory beyond that is
+left unrendered by `plot_BasalMixingModelRun` (it crops at `t_max`).
+
+`p_ref` carries the per-parameter reference values for the scatter/histogram
+markers: shape params at the best-fit draw, `t_0` at the posterior median.
 """
 function map_best_run(chain, k81, dar40, depth)
     df = DataFrame(chain)
     df.logjoint = vec(chain[:logjoint])
-    best_idx = argmax(df.logjoint)
+    df.loglikelihood = vec(chain[:loglikelihood])
+    best_idx = argmax(df.loglikelihood)          # best data fit, prior-independent
+    t0_ref   = quantile(df.t_0, 0.5)             # posterior median; t_0 unidentified past saturation
 
     p_best = (
         delta   = df.delta[best_idx],
@@ -188,14 +206,15 @@ function map_best_run(chain, k81, dar40, depth)
         t_old   = df.t_old[best_idx],
         F_ar40  = df.F_ar40[best_idx],
     )
+    p_ref = (p_best..., t_0 = t0_ref)
     b = BasalMixingModel(depth=depth, k81_obs_depths=k81.depth, dar40_obs_depths=dar40.depth)
-    t_elapsed_map = -df.t_0[best_idx]
+    t_elapsed_map = -t0_ref
     RunBasalMixingModel!(p_best, b, (k81, dar40); dt=0.1, t1=t_elapsed_map)
     # Override argmin-RMSE: the inference time is the endpoint, by construction.
     b.k81.time_min   = t_elapsed_map
     b.dar40.time_min = t_elapsed_map
     b.joint.time_min = t_elapsed_map
-    return (; b, t_elapsed_map, p_best, df, best_idx)
+    return (; b, t_elapsed_map, p_best, p_ref, df, best_idx)
 end
 
 """
@@ -296,12 +315,12 @@ function plot_ensemble(;
         if sec !== nothing && string(param) in names(sec.df)
             scatter!(ax, sec.df[!, param], sec.df.logjoint;
                      alpha=0.4, markersize=5, color=col_overlay_hist)
-            scatter!(ax, [sec.df[sec.best_idx, param]], [sec.df.logjoint[sec.best_idx]];
+            scatter!(ax, [sec.p_ref[param]], [sec.df.loglikelihood[sec.best_idx]];
                      color=col_overlay_hist, marker=:diamond, markersize=10)
         end
         scatter!(ax, primary.df[!, param], primary.df.logjoint;
                  alpha=0.6, markersize=6, color=:steelblue)
-        scatter!(ax, [primary.df[primary.best_idx, param]], [primary.df.logjoint[primary.best_idx]];
+        scatter!(ax, [primary.p_ref[param]], [primary.df.loglikelihood[primary.best_idx]];
                  color=:steelblue, marker=:diamond, markersize=10)
     end
     # Shared top-row legend identifying the two chains.
@@ -343,8 +362,9 @@ function plot_ensemble(;
         hist!(ax, v_p; bins=20, normalization=:pdf,
               color=(:steelblue, 0.7))
         vlines!(ax, [qp[2]]; color=:steelblue, linewidth=2.5)
-        # Primary MAP: same colour as median, thinner.
-        vlines!(ax, [primary.df[primary.best_idx, param]];
+        # Primary reference: best-fit shape params, t_0 at the median (= thick
+        # line for t_0). Thinner than the median marker.
+        vlines!(ax, [primary.p_ref[param]];
                 color=:steelblue, linewidth=1.2)
 
         # --- Secondary distribution + summary stats ---
@@ -355,8 +375,8 @@ function plot_ensemble(;
             stephist!(ax, v_s; bins=20, normalization=:pdf,
                       color=col_overlay_hist, linewidth=1.5, linestyle=:solid)
             vlines!(ax, [qs[2]]; color=col_overlay_hist, linewidth=2)
-            # Secondary MAP: same magenta, thinner.
-            vlines!(ax, [sec.df[sec.best_idx, param]];
+            # Secondary reference: best-fit shape params, t_0 at the median.
+            vlines!(ax, [sec.p_ref[param]];
                     color=col_overlay_hist, linewidth=1.2)
         end
 
@@ -435,7 +455,7 @@ end
 """
     derived_time_distribution(results::NamedTuple;
                               t_min=-3000.0, t_max=0.0,
-                              logp_window=10.0) -> (t_grid, p_t, map_t, n_kept, n_total)
+                              logp_window=10.0) -> (t_grid, p_t, median_t, n_kept, n_total)
 
 Empirical posterior on `t_0` (signed kyr BP) from the chain. The sampled-time
 model puts `t_0` directly in the chain, so this is just a histogram on the
@@ -445,9 +465,11 @@ model puts `t_0` directly in the chain, so this is just a histogram on the
 (see `logp_mask`) — needed when the Emcee chain has walkers stuck at a prior
 boundary that contribute zero posterior weight but inflate the raw histogram.
 
-`map_t` is the `t_0` of the `argmax(logjoint)` sample (NOT the histogram mode),
-which is the right summary when the histogram is concentrated by unmixedness
-rather than by likelihood.
+`median_t` is the posterior median of `t_0`. `t_0` is non-identifiable here —
+the ⁸¹Kr/δ⁴⁰Ar ages saturate, so the likelihood is flat in `t_0` and an
+`argmax(logjoint)` point would land on an arbitrary draw — so the median is the
+honest one-line summary, with the caveat that the real constraint is one-sided
+(a lower bound on |t_0|).
 """
 function derived_time_distribution(results::NamedTuple;
                                    t_min::Float64=-3000.0,
@@ -465,13 +487,14 @@ function derived_time_distribution(results::NamedTuple;
     end
     total = sum(counts)
     p_t = total > 0 ? counts ./ total : counts
-    # MAP from argmax(logjoint), not histogram mode.
-    map_t = df.t_0[argmax(df.logjoint)]
-    return (t_grid=t_grid, p_t=p_t, map_t=map_t, n_kept=n_kept, n_total=nrow(df))
+    # Posterior median: t_0 is non-identifiable (flat likelihood past
+    # saturation), so an argmax(logjoint) point would be arbitrary.
+    median_t = quantile(df.t_0[mask], 0.5)
+    return (t_grid=t_grid, p_t=p_t, median_t=median_t, n_kept=n_kept, n_total=nrow(df))
 end
 
 """
-    plot_derived_time(results; secondary=nothing, ...) -> (fig, t_grid, p_t, map_t)
+    plot_derived_time(results; secondary=nothing, ...) -> (fig, t_grid, p_t, median_t)
 
 Plot the sampled `t_0` posterior. If `secondary` is provided, overlay the
 secondary chain's pdf as a dashed black line.
@@ -494,8 +517,8 @@ function plot_derived_time(results::NamedTuple;
                title  = "Posterior on t_0  (primary :$likelihood, logp_window=$logp_window)")
     lines!(ax, d.t_grid, d.p_t; linewidth=2, color=:steelblue,
            label="primary (:$likelihood)")
-    vlines!(ax, [d.map_t]; color=:red, linewidth=2,
-            label="MAP = $(round(Int, d.map_t)) kyr")
+    vlines!(ax, [d.median_t]; color=:red, linewidth=2,
+            label="median = $(round(Int, d.median_t)) kyr")
 
     if secondary !== nothing
         d2 = derived_time_distribution(secondary; logp_window=logp_window)
@@ -522,7 +545,7 @@ function plot_derived_time(results::NamedTuple;
         tag = secondary === nothing ? _ltag(likelihood) : "81Kr+40Ar"
         mysave(prefix*"derived-time-pred-$tag.png", fig)
     end
-    return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, map_t=d.map_t)
+    return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, median_t=d.median_t)
 end
 
 """
