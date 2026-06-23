@@ -23,7 +23,7 @@ using JLD2, DataFrames, CairoMakie, Statistics, Dates, Printf
 using Turing   # loads FlexiChains so JLD2 can reconstruct the chain type
 include("BasalMixingModel.jl")
 
-const CHAIN_PATH = length(ARGS) >= 1 ? ARGS[1] : "output/ens-combined/chain.jld2"
+const CHAIN_PATH = length(ARGS) >= 1 ? ARGS[1] : "output/combined/chain.jld2"
 const OUTDIR     = "plots"
 
 log_line(s) = (println(s); flush(stdout))
@@ -78,7 +78,7 @@ function cond_grid(pname, pg, tg)
 end
 
 # ───────────────────────── Figure 1: t_0 vs each parameter ──────────────────
-log_line("[fig1] t_0 vs params: scatter + 95% band + 68% conditional contour")
+log_line("[fig1] t_0 vs params: scatter + 95% band + 95% conditional contour")
 fig1 = Figure(size=(1000, 620))
 Label(fig1[0, 1:3], "Posterior: inception age t₀ vs each parameter  ($(lik_label(lik)))";
       fontsize=16, font=:bold)
@@ -111,9 +111,9 @@ for (i, p) in enumerate(params_sorted)
 end
 Colorbar(fig1[1:2, 4], sc1; label="loglikelihood")
 Label(fig1[3, 1:3],
-      "Panels ordered by increasing r. Orange band: 95% posterior CI of the parameter. " *
-      "Dark grey contour: 95% joint region with the other parameters fixed at their posterior " *
-      "medians (shown only for |r| > 0.5). Dashed red: posterior median t₀.";
+      "Orange band: 95% posterior CI of the parameter. Dashed red: posterior median t₀.\n" *
+      "Contour: 95% joint region with the other parameters fixed at their posterior " *
+      "medians (when |r| > 0.5). ";
       fontsize=11, color=:gray30, halign=:left)
 
 # ──────────────────── Figure 2: (F_ar40, t_0) joint-loglik map ──────────────
