@@ -36,6 +36,30 @@ function plot_prior_line!(ax, prior::Distribution; color=:red, kwargs...)
     lines!(ax, x, pdf.(prior, x); color=color, kwargs...)
 end
 
+# Parameters shown in the per-parameter scatter / histogram figures, in panel
+# order, with their axis labels.
+const PARAM_NAMES  = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
+const PARAM_LABELS = ["delta (m)", "m_clean (m/yr)", "f_dirty",
+                      "t_old (kyr)", "F_ar40 (cc m⁻² kyr⁻¹)", "t_0 (kyr)"]
+
+# Overlay colour for the secondary chain (dark magenta — matches col_overlay in
+# plot_BasalMixingModelRun).
+const COL_OVERLAY = "#993366"
+
+# Isotope tag for a likelihood case, used in legends (LaTeX) and filenames (ASCII).
+function lik_latex(lik::Symbol)
+    lik === :combined && return L"^{81}Kr+^{40}Ar"
+    lik === :kr81     && return L"^{81}Kr"
+    lik === :ar40     && return L"^{40}Ar"
+    return LaTeXString(string(lik))
+end
+function lik_filename_tag(lik::Symbol)
+    lik === :combined && return "81Kr+40Ar"
+    lik === :kr81     && return "81Kr"
+    lik === :ar40     && return "40Ar"
+    return string(lik)
+end
+
 """
     logp_mask(df, logp_window) -> BitVector
 
@@ -217,221 +241,221 @@ function map_best_run(chain, k81, dar40, depth)
     return (; b, t_elapsed_map, p_best, p_ref, df, best_idx)
 end
 
+# ─────────────────────────── Per-figure plotters ───────────────────────────
+# Each standard ensemble figure is built by its own function so it can be driven
+# independently. The logp scatter and the marginal-histogram figures are
+# *inherently* comparisons (primary chain filled, secondary chain overlaid) and
+# always show every parameter, so they're generated once — not once per isotope
+# case. Only the best-fit depth-profile figure depends on `show_ar40` (whether
+# the δ⁴⁰Ar panel is drawn) and `show_mixing`.
+
 """
-    plot_ensemble(; chain, k81, dar40, depth, priors, ...; secondary=nothing)
-    plot_ensemble(results::NamedTuple; secondary=nothing, kwargs...)
-    plot_ensemble(path::String; kwargs...)
+    plot_best(results; show_ar40=true, show_mixing=false, ...) -> Figure
 
-Render the three standard ensemble figures and return them as a `NamedTuple
-(best, logp, hist)`:
-
-- *best*: depth profiles of mixing rate, ⁸¹Kr closed-system age, and δ⁴⁰Ar
-  at the MAP parameters (re-runs the forward model with `dt=0.1`).
-- *logp*: per-parameter scatter of log-joint vs. parameter value, MAP highlighted.
-- *hist*: marginal posterior histograms overlaid with each parameter's prior.
-
-If `secondary` is provided (a NamedTuple from `load_ensemble_results`), each
-figure additionally overlays the secondary chain's MAP run / scatter /
-histograms in a dashed black style. Use this to compare e.g. the combined
-likelihood (primary) against kr81-only (secondary).
+Best-fit depth profiles (mixing rate, ⁸¹Kr closed-system age, δ⁴⁰Ar) at the
+reference parameters from `map_best_run`, with posterior uncertainty bands
+(re-runs the forward model with `dt=0.1`). Primary chain only — the comparison
+chain is not overlaid here.
 """
-function plot_ensemble(;
-    chain,
-    k81,
-    dar40,
-    depth,
-    priors,
-    setup::AbstractString="",
-    sampler_choice::Symbol=:unknown,
-    likelihood::Symbol=:combined,
-    secondary=nothing,
-    logp_window::Float64=10.0,
-    show_ar40::Bool=true,
-    show_mixing::Bool=false,
-    show_grid_lines::Bool=false,
-    outdir::AbstractString="plots",
-    save_figures::Bool=true,
-)
-    params = [:delta, :m_clean, :f_dirty, :t_old, :F_ar40, :t_0]
-    labels = ["delta (m)", "m_clean (m/yr)", "f_dirty",
-              "t_old (kyr)", "F_ar40 (cc m⁻² kyr⁻¹)", "t_0 (kyr)"]
-    if !show_ar40
-        # Drop the ⁴⁰Ar-only parameter (F_ar40) from the parameter scans.
-        keep = findall(p -> p !== :F_ar40, params)
-        params = params[keep]
-        labels = labels[keep]
+function plot_best(results::NamedTuple;
+                   show_ar40::Bool=true,
+                   show_mixing::Bool=false,
+                   show_grid_lines::Bool=false,
+                   outdir::AbstractString="plots",
+                   save_figures::Bool=true)
+    k81, dar40, depth = results.k81, results.dar40, results.depth
+    primary = map_best_run(results.chain, k81, dar40, depth)
+
+    println("Computing primary posterior trajectories (n_thin=300)…")
+    posterior = compute_posterior_trajectories(results.chain, k81, dar40, depth; n_thin=300)
+    println("  used $(posterior.n_used) samples")
+
+    fig = plot_BasalMixingModelRun(primary.b;
+                                   k81_obs=k81,
+                                   dar40_obs=(show_ar40 ? dar40 : nothing),
+                                   t_max=primary.t_elapsed_map,
+                                   overlay=nothing,
+                                   posterior=posterior,
+                                   show_mixing=show_mixing,
+                                   show_grid_lines=show_grid_lines)
+    if save_figures
+        mkpath(outdir)
+        prefix = joinpath(outdir, string(Dates.today())*"_")
+        # tag = "81Kr+40Ar" when the δ⁴⁰Ar panel is shown, "81Kr" otherwise;
+        # "-mixing" suffix when the mixing-rate panel is included.
+        tag = show_ar40 ? "81Kr+40Ar" : "81Kr"
+        mix = show_mixing ? "-mixing" : ""
+        mysave(prefix*"ens-best-$tag$mix.png", fig)
     end
+    return fig
+end
 
-    primary = map_best_run(chain, k81, dar40, depth)
+"""
+    plot_logp(results; secondary=nothing, ...) -> Figure
+
+Per-parameter scatter of log-joint vs. parameter value, reference draw
+highlighted. Always shows every parameter; `secondary` overlays a second chain
+(e.g. kr81-only on top of combined). Filename is tagged by the primary chain's
+likelihood case, so the combined+kr81 comparison is saved once.
+"""
+function plot_logp(results::NamedTuple;
+                   secondary=nothing,
+                   outdir::AbstractString="plots",
+                   save_figures::Bool=true)
+    primary = map_best_run(results.chain, results.k81, results.dar40, results.depth)
     sec     = secondary === nothing ? nothing :
               map_best_run(secondary.chain, secondary.k81, secondary.dar40, secondary.depth)
-
-    # LaTeX labels for legends.
-    function lik_latex(lik::Symbol)
-        lik === :combined && return L"^{81}Kr+^{40}Ar"
-        lik === :kr81     && return L"^{81}Kr"
-        lik === :ar40     && return L"^{40}Ar"
-        return LaTeXString(string(lik))
-    end
-    # ASCII-clean version for filenames — same isotope tag as the legend
-    # without the LaTeX braces and superscript markers.
-    function lik_filename_tag(lik::Symbol)
-        lik === :combined && return "81Kr+40Ar"
-        lik === :kr81     && return "81Kr"
-        lik === :ar40     && return "40Ar"
-        return string(lik)
-    end
-    primary_label   = lik_latex(likelihood)
+    primary_label   = lik_latex(get(results, :likelihood, :combined))
     secondary_label = secondary === nothing ? nothing :
                       lik_latex(get(secondary, :likelihood, :unknown))
 
-    ## Posterior trajectory bands (primary only — best-fit plot omits kr81 lines) ##
-    println("Computing primary posterior trajectories (n_thin=300)…")
-    posterior = compute_posterior_trajectories(chain, k81, dar40, depth; n_thin=300)
-    println("  used $(posterior.n_used) samples")
-
-    ## Best-fit depth profiles — primary only ##
-    fig_best = plot_BasalMixingModelRun(primary.b;
-                                        k81_obs=k81,
-                                        dar40_obs=(show_ar40 ? dar40 : nothing),
-                                        t_max=primary.t_elapsed_map,
-                                        overlay=nothing,
-                                        posterior=posterior,
-                                        show_mixing=show_mixing,
-                                        show_grid_lines=show_grid_lines)
-
-    ## log-posterior scatter ##
-    col_overlay_hist = "#993366"   # dark magenta — matches col_overlay in plot_BasalMixingModelRun
-    fig_logp = Figure(size=(900, 700))
+    fig = Figure(size=(900, 700))
     ipar = 0
-    ax_first_logp = nothing
-    for (param, label) in zip(params, labels)
+    ax_first = nothing
+    for (param, label) in zip(PARAM_NAMES, PARAM_LABELS)
         string(param) in names(primary.df) || continue
         ipar += 1
         row, col = divrem(ipar-1, 2)
-        ax = Axis(fig_logp[row+1, col+1], xlabel=label, ylabel="log p")
-        ipar == 1 && (ax_first_logp = ax)
+        ax = Axis(fig[row+1, col+1], xlabel=label, ylabel="log p")
+        ipar == 1 && (ax_first = ax)
         ylims!(ax, (-50, 0))
         if sec !== nothing && string(param) in names(sec.df)
             scatter!(ax, sec.df[!, param], sec.df.logjoint;
-                     alpha=0.4, markersize=5, color=col_overlay_hist)
+                     alpha=0.4, markersize=5, color=COL_OVERLAY)
             scatter!(ax, [sec.p_ref[param]], [sec.df.loglikelihood[sec.best_idx]];
-                     color=col_overlay_hist, marker=:diamond, markersize=10)
+                     color=COL_OVERLAY, marker=:diamond, markersize=10)
         end
         scatter!(ax, primary.df[!, param], primary.df.logjoint;
                  alpha=0.6, markersize=6, color=:steelblue)
         scatter!(ax, [primary.p_ref[param]], [primary.df.loglikelihood[primary.best_idx]];
                  color=:steelblue, marker=:diamond, markersize=10)
     end
-    # Shared top-row legend identifying the two chains.
-    if ax_first_logp !== nothing
-        logp_legend_elems = LegendElement[MarkerElement(color=:steelblue, marker=:circle, markersize=8)]
-        logp_legend_labels = AbstractString[primary_label]
+    # Shared top-row legend identifying the chains.
+    if ax_first !== nothing
+        elems = LegendElement[MarkerElement(color=:steelblue, marker=:circle, markersize=8)]
+        labs  = AbstractString[primary_label]
         if sec !== nothing
-            push!(logp_legend_elems, MarkerElement(color=col_overlay_hist, marker=:circle, markersize=8))
-            push!(logp_legend_labels, secondary_label)
+            push!(elems, MarkerElement(color=COL_OVERLAY, marker=:circle, markersize=8))
+            push!(labs, secondary_label)
         end
-        Legend(fig_logp[0, :], logp_legend_elems, logp_legend_labels;
-               orientation=:horizontal, framevisible=false, tellheight=true)
+        Legend(fig[0, :], elems, labs; orientation=:horizontal, framevisible=false, tellheight=true)
     end
+    if save_figures
+        mkpath(outdir)
+        prefix = joinpath(outdir, string(Dates.today())*"_")
+        mysave(prefix*"ens-logp-$(lik_filename_tag(get(results, :likelihood, :combined))).png", fig)
+    end
+    return fig
+end
 
-    ## Marginal histograms vs priors ##
+"""
+    plot_hist(results; secondary=nothing, logp_window=10.0, ...) -> Figure
+
+Marginal posterior histograms overlaid with each parameter's prior. Always
+shows every parameter; `secondary` overlays a second chain. Samples are filtered
+to within `logp_window` of the MAP (see `logp_mask`). Filename is tagged by the
+primary chain's likelihood case, so the combined+kr81 comparison is saved once.
+"""
+function plot_hist(results::NamedTuple;
+                   secondary=nothing,
+                   logp_window::Float64=10.0,
+                   outdir::AbstractString="plots",
+                   save_figures::Bool=true)
+    priors  = results.priors
+    primary = map_best_run(results.chain, results.k81, results.dar40, results.depth)
+    sec     = secondary === nothing ? nothing :
+              map_best_run(secondary.chain, secondary.k81, secondary.dar40, secondary.depth)
+    primary_label   = lik_latex(get(results, :likelihood, :combined))
+    secondary_label = secondary === nothing ? nothing :
+                      lik_latex(get(secondary, :likelihood, :unknown))
+
     # Filter to samples within `logp_window` of MAP — see logp_mask docstring.
     mask_p = logp_mask(primary.df, logp_window)
     mask_s = sec === nothing ? nothing : logp_mask(sec.df, logp_window)
-    n_kept_p = count(mask_p)
-    n_kept_s = mask_s === nothing ? 0 : count(mask_s)
-    println("Histogram filter: primary kept $n_kept_p/$(nrow(primary.df)) " *
+    println("Histogram filter: primary kept $(count(mask_p))/$(nrow(primary.df)) " *
             "(logp_window=$logp_window)" *
-            (sec === nothing ? "" : "; secondary kept $n_kept_s/$(nrow(sec.df))"))
+            (sec === nothing ? "" : "; secondary kept $(count(mask_s))/$(nrow(sec.df))"))
 
-    fig_hist = Figure(size=(900, 700))
-    # col_overlay_hist is set up above.
+    fig = Figure(size=(900, 700))
     ipar = 0
-    for (param, label) in zip(params, labels)
+    for (param, label) in zip(PARAM_NAMES, PARAM_LABELS)
         string(param) in names(primary.df) || continue
         ipar += 1
         row, col = divrem(ipar-1, 2)
-        ax = Axis(fig_hist[row+1, col+1], xlabel=label, ylabel="density")
+        ax = Axis(fig[row+1, col+1], xlabel=label, ylabel="density")
 
         # --- Primary distribution + summary stats ---
         v_p = primary.df[mask_p, param]
-        qp = quantile(v_p, [0.025, 0.5, 0.975])
+        qp  = quantile(v_p, [0.025, 0.5, 0.975])
         # 95% CI band first (under histogram so it doesn't obscure shape).
         vspan!(ax, [qp[1]], [qp[3]]; color=(:steelblue, 0.12))
-        hist!(ax, v_p; bins=20, normalization=:pdf,
-              color=(:steelblue, 0.7))
+        hist!(ax, v_p; bins=20, normalization=:pdf, color=(:steelblue, 0.7))
         vlines!(ax, [qp[2]]; color=:steelblue, linewidth=2.5)
-        # Primary reference: best-fit shape params, t_0 at the median (= thick
-        # line for t_0). Thinner than the median marker.
-        vlines!(ax, [primary.p_ref[param]];
-                color=:steelblue, linewidth=1.2)
+        # Primary reference: best-fit shape params, t_0 at the median.
+        vlines!(ax, [primary.p_ref[param]]; color=:steelblue, linewidth=1.2)
 
         # --- Secondary distribution + summary stats ---
         if sec !== nothing && string(param) in names(sec.df)
             v_s = sec.df[mask_s, param]
-            qs = quantile(v_s, [0.025, 0.5, 0.975])
-            vspan!(ax, [qs[1]], [qs[3]]; color=(col_overlay_hist, 0.10))
+            qs  = quantile(v_s, [0.025, 0.5, 0.975])
+            vspan!(ax, [qs[1]], [qs[3]]; color=(COL_OVERLAY, 0.10))
             stephist!(ax, v_s; bins=20, normalization=:pdf,
-                      color=col_overlay_hist, linewidth=1.5, linestyle=:solid)
-            vlines!(ax, [qs[2]]; color=col_overlay_hist, linewidth=2)
-            # Secondary reference: best-fit shape params, t_0 at the median.
-            vlines!(ax, [sec.p_ref[param]];
-                    color=col_overlay_hist, linewidth=1.2)
+                      color=COL_OVERLAY, linewidth=1.5, linestyle=:solid)
+            vlines!(ax, [qs[2]]; color=COL_OVERLAY, linewidth=2)
+            vlines!(ax, [sec.p_ref[param]]; color=COL_OVERLAY, linewidth=1.2)
         end
 
         # Prior line (grey reference).
         if haskey(priors, param) && priors[param] isa Distribution
-            plot_prior_line!(ax, priors[param];
-                             linewidth=2, color=:grey50)
+            plot_prior_line!(ax, priors[param]; linewidth=2, color=:grey50)
         end
     end
 
     # Shared top-row legend. Declare element vector as LegendElement so we
     # can mix PolyElement / LineElement entries.
-    hist_legend_elems = LegendElement[PolyElement(color=(:steelblue, 0.7), strokevisible=false)]
-    hist_legend_labels = AbstractString[primary_label]
+    elems = LegendElement[PolyElement(color=(:steelblue, 0.7), strokevisible=false)]
+    labs  = AbstractString[primary_label]
     if sec !== nothing
-        push!(hist_legend_elems, LineElement(color=col_overlay_hist, linewidth=1.5))
-        push!(hist_legend_labels, secondary_label)
+        push!(elems, LineElement(color=COL_OVERLAY, linewidth=1.5))
+        push!(labs, secondary_label)
     end
-    push!(hist_legend_elems, LineElement(color=:grey50, linewidth=2))
-    push!(hist_legend_labels, "Prior")
-    Legend(fig_hist[0, :], hist_legend_elems, hist_legend_labels;
-           orientation=:horizontal, framevisible=false, tellheight=true)
+    push!(elems, LineElement(color=:grey50, linewidth=2))
+    push!(labs, "Prior")
+    Legend(fig[0, :], elems, labs; orientation=:horizontal, framevisible=false, tellheight=true)
 
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        # Simple convention: tag = "81Kr+40Ar" when ⁴⁰Ar content is in the
-        # figure, "81Kr" when only ⁸¹Kr panels are kept. The secondary-chain
-        # comparison and setup name are implicit (always shown when both
-        # chains are loaded, always one mesh discretisation per project).
-        tag = show_ar40 ? "81Kr+40Ar" : "81Kr"
-        # Best-fit picks up a "-mixing" suffix when the mixing-rate panel
-        # is included; the default best plot leaves it out.
-        best_mix_tag = show_mixing ? "-mixing" : ""
-        mysave(prefix*"ens-best-$tag$best_mix_tag.png", fig_best)
-        mysave(prefix*"ens-logp-$tag.png", fig_logp)
-        mysave(prefix*"ens-hist-$tag.png", fig_hist)
+        mysave(prefix*"ens-hist-$(lik_filename_tag(get(results, :likelihood, :combined))).png", fig)
     end
-
-    return (best=fig_best, logp=fig_logp, hist=fig_hist)
+    return fig
 end
 
-plot_ensemble(results::NamedTuple; secondary=nothing, kwargs...) =
-    plot_ensemble(;
-        chain=results.chain,
-        k81=results.k81,
-        dar40=results.dar40,
-        depth=results.depth,
-        priors=results.priors,
-        setup=get(results, :setup, ""),
-        sampler_choice=get(results, :sampler_choice, :unknown),
-        likelihood=get(results, :likelihood, :combined),
-        secondary=secondary,
-        kwargs...,
-    )
+"""
+    plot_ensemble(results::NamedTuple; secondary=nothing, kwargs...) -> (best, logp, hist)
+    plot_ensemble(path::String; kwargs...)
+
+Convenience wrapper: build the three standard ensemble figures for one config
+and return them as a `NamedTuple (best, logp, hist)`. `show_ar40` / `show_mixing`
+affect only `best`; `logp` and `hist` always show every parameter. To produce
+the several best-fit variants without re-rendering logp/hist, call `plot_best` /
+`plot_logp` / `plot_hist` directly (see the bottom-of-file driver).
+"""
+function plot_ensemble(results::NamedTuple;
+                       secondary=nothing,
+                       show_ar40::Bool=true,
+                       show_mixing::Bool=false,
+                       show_grid_lines::Bool=false,
+                       logp_window::Float64=10.0,
+                       outdir::AbstractString="plots",
+                       save_figures::Bool=true)
+    best = plot_best(results; show_ar40=show_ar40, show_mixing=show_mixing,
+                     show_grid_lines=show_grid_lines, outdir=outdir, save_figures=save_figures)
+    logp = plot_logp(results; secondary=secondary, outdir=outdir, save_figures=save_figures)
+    hist = plot_hist(results; secondary=secondary, logp_window=logp_window,
+                     outdir=outdir, save_figures=save_figures)
+    return (best=best, logp=logp, hist=hist)
+end
 
 plot_ensemble(path::AbstractString; kwargs...) =
     plot_ensemble(load_ensemble_results(String(path)); kwargs...)
@@ -440,9 +464,8 @@ plot_ensemble(path::AbstractString; kwargs...) =
     plot_ensemble_comparison(primary_path, secondary_path; kwargs...)
 
 Convenience wrapper: load two chains (e.g. combined vs kr81-only) and produce
-the standard three figures with the secondary overlaid as a dashed black line
-on top of the primary. Returns the same `(best, logp, hist)` NamedTuple as
-`plot_ensemble`.
+the three figures with the secondary overlaid on the parameter scatter /
+histograms. Returns the same `(best, logp, hist)` NamedTuple as `plot_ensemble`.
 """
 function plot_ensemble_comparison(primary_path::AbstractString,
                                   secondary_path::AbstractString;
@@ -533,16 +556,10 @@ function plot_derived_time(results::NamedTuple;
     if save_figures
         mkpath(outdir)
         prefix = joinpath(outdir, string(Dates.today())*"_")
-        # Match plot_ensemble's tag convention. derived-time always shows
-        # the t_0 posterior; if combined and kr81 are both available the
-        # figure compares them, otherwise only the primary's t_0 is shown.
-        function _ltag(lik::Symbol)
-            lik === :combined && return "81Kr+40Ar"
-            lik === :kr81     && return "81Kr"
-            lik === :ar40     && return "40Ar"
-            return string(lik)
-        end
-        tag = secondary === nothing ? _ltag(likelihood) : "81Kr+40Ar"
+        # Match the per-figure tag convention. derived-time always shows the
+        # t_0 posterior; if combined and kr81 are both available the figure
+        # compares them, otherwise only the primary's t_0 is shown.
+        tag = secondary === nothing ? lik_filename_tag(likelihood) : "81Kr+40Ar"
         mysave(prefix*"derived-time-pred-$tag.png", fig)
     end
     return (fig=fig, t_grid=d.t_grid, p_t=d.p_t, median_t=d.median_t)
@@ -566,22 +583,25 @@ end
 # Including this file from the REPL never auto-plots — call plot_ensemble*
 # functions yourself.
 if abspath(PROGRAM_FILE) == @__FILE__
-    # Variants per run:
-    #   ⁴⁰Ar × mixing-panel → 4 "best" figures, 2 each for hist + logp,
-    #   1 derived-time. Re-saving hist/logp when only show_mixing flips
-    #   would just overwrite identical content, so we skip those calls.
+    # The best-fit depth profile has 4 variants (δ⁴⁰Ar panel × mixing panel).
+    # The logp scatter and histogram already overlay both chains in one figure
+    # and always show every parameter, so each is made once (not per isotope
+    # case). derived-time is made once.
+    function plot_all(results; secondary=nothing)
+        plot_best(results)                                          # 81Kr+40Ar
+        plot_best(results; show_mixing=true)                        # 81Kr+40Ar, +mixing
+        plot_best(results; show_ar40=false)                         # 81Kr
+        plot_best(results; show_ar40=false, show_mixing=true)       # 81Kr, +mixing
+        plot_logp(results; secondary=secondary)
+        plot_hist(results; secondary=secondary)
+        plot_derived_time(results; secondary=secondary)
+    end
+
     if length(ARGS) >= 2
-        plot_ensemble_comparison(ARGS[1], ARGS[2])                                          # 81Kr+40Ar, no mixing
-        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_mixing=true)                        # 81Kr+40Ar, +mixing
-        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false)                         # 81Kr, no mixing
-        plot_ensemble_comparison(ARGS[1], ARGS[2]; show_ar40=false, show_mixing=true)       # 81Kr, +mixing
-        plot_derived_time_comparison(ARGS[1], ARGS[2])
+        plot_all(load_ensemble_results(ARGS[1]);
+                 secondary=load_ensemble_results(ARGS[2]))
     else
         path = length(ARGS) >= 1 ? ARGS[1] : "results/emcee-chain-combined.jld2"
-        plot_ensemble(path)
-        plot_ensemble(path; show_mixing=true)
-        plot_ensemble(path; show_ar40=false)
-        plot_ensemble(path; show_ar40=false, show_mixing=true)
-        plot_derived_time(load_ensemble_results(path))
+        plot_all(load_ensemble_results(path))
     end
 end
