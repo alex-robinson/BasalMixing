@@ -89,7 +89,7 @@ priors = (
     m_clean     = truncated(Normal(0.03, 0.002), lower=0.0), # 0.03 m/kyr
     f_dirty     = Uniform(3.0, 15.0),   # dirty/clean mixing-rate ratio
     #t_old       = truncated(Normal(250.0,25.0), lower=0.0),  # 250 kyr
-    t_old       = Uniform(100.0, 250.0),  # 100-250 kyr per Sarah's email 2026-06-19
+    t_old       = Uniform(150.0, 300.0),  # 100-250 kyr per Sarah's email 2026-06-19
     F_ar40      = Uniform(0.004,0.007), # bottom-source ⁴⁰Ar flux, cc(STP) m⁻² kyr⁻¹
                                         # (enters ODE as F_ar40/thickness[end])
     # σ_k81 and σ_dar40 are per-observation 1σ measurement-error VECTORS taken
@@ -105,7 +105,7 @@ priors = (
     # forward-model run length 0 → -t_0. Bounds [-3000, -700] kyr come from
     # the geological window for first GrIS glaciation (~2700 kyr) and the
     # ⁸¹Kr-implied minimum summit ice cover (~800 kyr).
-    t_0         = Uniform(-3000.0, -700.0),
+    t_0         = Uniform(-3000.0, -650.0),
 )
 
 """
