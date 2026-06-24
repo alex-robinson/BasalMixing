@@ -15,6 +15,7 @@
 ##   2. t0-vs-far40  : joint-loglik map over (F_ar40, t_0) with the other params
 ##                     pinned at their posterior medians, posterior samples
 ##                     overlaid (how sharply would knowing F_ar40 date the onset?).
+##                     Off by default — set `const MAKE_FAR40 = true` below.
 ##
 ## Usage:  julia --project=. plot_t0_sensitivity.jl [combined_chain.jld2]
 
@@ -25,6 +26,9 @@ include("BasalMixingModel.jl")
 
 const CHAIN_PATH = length(ARGS) >= 1 ? ARGS[1] : "output/combined/chain.jld2"
 const OUTDIR     = "plots"
+# Figure 2 (t0-vs-far40, the (F_ar40, t_0) joint-loglik map) is expensive and
+# off by default. Set to true to build and save it.
+const MAKE_FAR40 = false
 
 log_line(s) = (println(s); flush(stdout))
 log_line("[load] $CHAIN_PATH")
@@ -109,57 +113,69 @@ for (i, p) in enumerate(params_sorted)
           align=(:left, :top), fontsize=13, font=:bold,
           color = abs(rho[p]) > R_CUTOFF ? :firebrick : :gray30)
 end
-Colorbar(fig1[1:2, 4], sc1; label="loglikelihood")
-Label(fig1[3, 1:3],
-      "Orange band: 95% posterior CI of the parameter. Dashed red: posterior median t₀.\n" *
-      "Contour: 95% joint region with the other parameters fixed at their posterior " *
-      "medians (when |r| > 0.5). ";
-      fontsize=11, color=:gray30, halign=:left)
+Colorbar(fig1[1:2, 4], sc1; label="loglikelihood", height=Relative(2/3))
+# Caption in the otherwise-empty sixth panel (bottom-right), left-justified and
+# word-wrapped to the panel width.
+Label(fig1[2, 3],
+      "r: correlation between t₀ and the parameter\n\n"*
+      "Orange band: 95% posterior CI of the parameter.\n\n" *
+      "Dashed red: posterior median t₀.\n\n" *
+      "Grey contour: 95% joint region with the other parameters fixed at " *
+      "their posterior medians (when |r| > 0.5)\n\n"
+      ;
+      fontsize=12, color=:gray30, halign=:left, valign=:top,
+      justification=:left, lineheight=1.15, word_wrap=true,
+      tellwidth=false, tellheight=false)
 
-# ──────────────────── Figure 2: (F_ar40, t_0) joint-loglik map ──────────────
-log_line("[fig2] joint-loglik map over (F_ar40, t_0) — others at posterior median")
-F_grid  = collect(range(0.0025, 0.0095; length=44))
-t0_grid = collect(range(-3000.0, -300.0; length=150))
-dLL = cond_grid(:F_ar40, F_grid, t0_grid)        # normalised to its own max
-# Conditional ridge: best t_0 for each assumed F_ar40.
-ridge_t0 = [t0_grid[argmax(view(dLL, :, j))] for j in eachindex(F_grid)]
-
-fig2 = Figure(size=(900, 640))
-ax = Axis(fig2[1, 1]; xlabel="F_ar40  (bottom-source ⁴⁰Ar flux, cc m⁻² kyr⁻¹)",
-          ylabel="t₀  (inception age, kyr)",
-          title="Inception age t₀ vs ⁴⁰Ar flux  ($(lik_label(lik)))")
-# Show only the 95% joint region (Δχ²=5.99, 2 dof → ΔlogL=-3.0); white outside.
-dLL_masked = map(x -> x >= thr95 ? x : NaN, dLL)
-hm = heatmap!(ax, F_grid, t0_grid, permutedims(dLL_masked);
-              colormap=:viridis, colorrange=(thr95, 0))
-contour!(ax, F_grid, t0_grid, permutedims(dLL); levels=[thr68],  # 68% (2 dof)
-         color=:white, linewidth=1.2)
-# Posterior samples: small solid semi-transparent dots. Points landing on the
-# white (masked) area are samples that fell outside the 95% region — i.e. drawn
-# at low likelihood — which is informative to see directly.
-scatter!(ax, df.F_ar40, df.t_0; color=(:black, 0.35), markersize=4)
-# Posterior 95% band on F_ar40 and median t_0.
-Flo, Fhi = quantile(df.F_ar40, [0.025, 0.975])
-vspan!(ax, Flo, Fhi; color=(:orange, 0.12))
-hlines!(ax, [t0_med]; color=:orange, linestyle=:dash, linewidth=1.5,
-        label=@sprintf("posterior median t₀ = %d kyr", round(Int, t0_med)))
-axislegend(ax; position=:rt, framevisible=true, backgroundcolor=(:white, 0.8))
-Colorbar(fig2[1, 2], hm; label="Δ loglikelihood (vs best)")
-Label(fig2[2, 1],
-      "Coloured = 95% joint region; white contour = 68% (others fixed at posterior median). " *
-      "Orange band: posterior 95% on F_ar40.";
-      fontsize=11, color=:gray30, halign=:left, tellwidth=false)
-
+# Save Figure 1 (always).
 prefix = joinpath(OUTDIR, string(Dates.today()) * "_")
 mkpath(OUTDIR)
 save(prefix * "t0-vs-params.png", fig1; px_per_unit=2)
-save(prefix * "t0-vs-far40.png", fig2; px_per_unit=2)
 log_line("[saved] " * prefix * "t0-vs-params.png")
-log_line("[saved] " * prefix * "t0-vs-far40.png")
 
-# Console summary: how tightly would a given F_ar40 precision pin t_0?
-log_line("\nConditional best-fit t₀ along the ridge:")
-for (Fv, tv) in zip(F_grid[1:6:end], ridge_t0[1:6:end])
-    log_line(@sprintf("  F_ar40 = %.4f  ->  t₀ ≈ %d kyr", Fv, round(Int, tv)))
+# ──────────────────── Figure 2: (F_ar40, t_0) joint-loglik map ──────────────
+# Off by default (`const MAKE_FAR40`): the conditional-loglik grid is expensive.
+if MAKE_FAR40
+    log_line("[fig2] joint-loglik map over (F_ar40, t_0) — others at posterior median")
+    F_grid  = collect(range(0.0025, 0.0095; length=44))
+    t0_grid = collect(range(-3000.0, -300.0; length=150))
+    dLL = cond_grid(:F_ar40, F_grid, t0_grid)        # normalised to its own max
+    # Conditional ridge: best t_0 for each assumed F_ar40.
+    ridge_t0 = [t0_grid[argmax(view(dLL, :, j))] for j in eachindex(F_grid)]
+
+    fig2 = Figure(size=(900, 640))
+    ax = Axis(fig2[1, 1]; xlabel="F_ar40  (bottom-source ⁴⁰Ar flux, cc m⁻² kyr⁻¹)",
+              ylabel="t₀  (inception age, kyr)",
+              title="Inception age t₀ vs ⁴⁰Ar flux  ($(lik_label(lik)))")
+    # Show only the 95% joint region (Δχ²=5.99, 2 dof → ΔlogL=-3.0); white outside.
+    dLL_masked = map(x -> x >= thr95 ? x : NaN, dLL)
+    hm = heatmap!(ax, F_grid, t0_grid, permutedims(dLL_masked);
+                  colormap=:viridis, colorrange=(thr95, 0))
+    contour!(ax, F_grid, t0_grid, permutedims(dLL); levels=[thr68],  # 68% (2 dof)
+             color=:white, linewidth=1.2)
+    # Posterior samples: small solid semi-transparent dots. Points landing on the
+    # white (masked) area are samples that fell outside the 95% region — i.e. drawn
+    # at low likelihood — which is informative to see directly.
+    scatter!(ax, df.F_ar40, df.t_0; color=(:black, 0.35), markersize=4)
+    # Posterior 95% band on F_ar40 and median t_0.
+    Flo, Fhi = quantile(df.F_ar40, [0.025, 0.975])
+    vspan!(ax, Flo, Fhi; color=(:orange, 0.12))
+    hlines!(ax, [t0_med]; color=:orange, linestyle=:dash, linewidth=1.5,
+            label=@sprintf("posterior median t₀ = %d kyr", round(Int, t0_med)))
+    axislegend(ax; position=:rt, framevisible=true, backgroundcolor=(:white, 0.8))
+    Colorbar(fig2[1, 2], hm; label="Δ loglikelihood (vs best)")
+    Label(fig2[2, 1],
+          "Coloured = 95% joint region; white contour = 68% (others fixed at posterior median). " *
+          "Orange band: posterior 95% on F_ar40.";
+          fontsize=11, color=:gray30, halign=:left, tellwidth=false)
+
+    save(prefix * "t0-vs-far40.png", fig2; px_per_unit=2)
+    log_line("[saved] " * prefix * "t0-vs-far40.png")
+
+    # Console summary: how tightly would a given F_ar40 precision pin t_0?
+    log_line("\nConditional best-fit t₀ along the ridge:")
+    for (Fv, tv) in zip(F_grid[1:6:end], ridge_t0[1:6:end])
+        log_line(@sprintf("  F_ar40 = %.4f  ->  t₀ ≈ %d kyr", Fv, round(Int, tv)))
+    end
 end
 log_line("[done]")
